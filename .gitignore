@@ -1,0 +1,11 @@
+.env
+*.env
+!.env.example
+*.key
+*.pem
+id_rsa*
+id-rsa*
+*.sqlite
+*.sqlite3
+node_modules/
+dist/
