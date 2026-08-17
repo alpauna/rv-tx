@@ -32,12 +32,21 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  login: (password) => request('/login', { method: 'POST', body: JSON.stringify({ password }) }),
+  login: (email, password) => request('/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   logout: () => request('/logout', { method: 'POST' }),
+  whoami: () => request('/whoami'),
   listNodes: () => request('/nodes'),
   listResources: () => request('/resources'),
   createResource: (resource) => request('/resources', { method: 'POST', body: JSON.stringify(resource) }),
   deleteResource: (name) => request(`/resources/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  listUsers: () => request('/users'),
+  inviteUser: (email, role) => request('/users', { method: 'POST', body: JSON.stringify({ email, role }) }),
+  deleteUser: (email) => request(`/users/${encodeURIComponent(email)}`, { method: 'DELETE' }),
+  setUserRole: (email, role) => request(`/users/${encodeURIComponent(email)}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),
+  inviteInfo: (token) => request(`/invite-info?token=${encodeURIComponent(token)}`),
+  acceptInvite: (token, password) => request('/accept-invite', { method: 'POST', body: JSON.stringify({ token, password }) }),
+  forgotPassword: (email) => request('/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }),
+  resetPassword: (token, password) => request('/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) }),
 };
 
 export { ApiError };

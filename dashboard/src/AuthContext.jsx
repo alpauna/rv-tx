@@ -3,32 +3,35 @@ import { api, ApiError } from './api';
 
 const AuthContext = createContext(null);
 
-// There's no dedicated "am I logged in" endpoint -- the session cookie
-// is just checked lazily by whichever real API call runs first. On
-// load, probe with a cheap authenticated call (listNodes) so refreshing
-// the page doesn't bounce a real session back to the login screen.
+// user is null while checking, false when definitely logged out, or
+// {email, role} once whoami succeeds -- refreshing the page doesn't
+// bounce a real session back to the login screen.
 export function AuthProvider({ children }) {
-  const [authed, setAuthed] = useState(null); // null = still checking
+  const [user, setUser] = useState(null);
 
   useEffect(() => {
     api
-      .listNodes()
-      .then(() => setAuthed(true))
-      .catch((err) => setAuthed(!(err instanceof ApiError && err.status === 401)));
+      .whoami()
+      .then((u) => setUser(u))
+      .catch((err) => setUser(err instanceof ApiError && err.status === 401 ? false : false));
   }, []);
 
-  async function login(password) {
-    await api.login(password);
-    setAuthed(true);
+  async function login(email, password) {
+    await api.login(email, password);
+    const u = await api.whoami();
+    setUser(u);
   }
 
   async function logout() {
     await api.logout().catch(() => {});
-    setAuthed(false);
+    setUser(false);
   }
 
+  const authed = user === null ? null : user !== false;
+  const isAdmin = !!user && user.role === 'admin';
+
   return (
-    <AuthContext.Provider value={{ authed, login, logout }}>
+    <AuthContext.Provider value={{ user, authed, isAdmin, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

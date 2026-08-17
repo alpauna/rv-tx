@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useAuth } from '../AuthContext';
 import { api } from '../api';
 
 const PROTOCOLS = ['http', 'tcp', 'udp'];
@@ -200,6 +201,7 @@ function DnsNameserverWizard({ onCreated }) {
 }
 
 export default function Resources() {
+  const { isAdmin } = useAuth();
   const [resources, setResources] = useState(null);
   const [nodes, setNodes] = useState([]);
   const [error, setError] = useState(null);
@@ -240,7 +242,7 @@ export default function Resources() {
                 <th>Domain / entry point</th>
                 <th>Cert resolver</th>
                 <th>Targets</th>
-                <th></th>
+                {isAdmin && <th></th>}
               </tr>
             </thead>
             <tbody>
@@ -253,9 +255,11 @@ export default function Resources() {
                   <td className="mono">
                     {r.targets.map((t) => `${t.address}:${t.port}${t.role ? ` (${t.role})` : ''}`).join(', ')}
                   </td>
-                  <td>
-                    <button className="danger" onClick={() => onDelete(r.name)}>Delete</button>
-                  </td>
+                  {isAdmin && (
+                    <td>
+                      <button className="danger" onClick={() => onDelete(r.name)}>Delete</button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -263,14 +267,18 @@ export default function Resources() {
         )}
       </div>
 
-      <NewResourceForm nodes={nodes} onCreated={load} />
+      {isAdmin && (
+        <>
+          <NewResourceForm nodes={nodes} onCreated={load} />
 
-      <div className="panel">
-        <button type="button" className="secondary" onClick={() => setShowWizard((v) => !v)}>
-          {showWizard ? 'Hide DNS nameserver wizard' : 'Add DNS nameserver...'}
-        </button>
-      </div>
-      {showWizard && <DnsNameserverWizard onCreated={load} />}
+          <div className="panel">
+            <button type="button" className="secondary" onClick={() => setShowWizard((v) => !v)}>
+              {showWizard ? 'Hide DNS nameserver wizard' : 'Add DNS nameserver...'}
+            </button>
+          </div>
+          {showWizard && <DnsNameserverWizard onCreated={load} />}
+        </>
+      )}
     </div>
   );
 }
