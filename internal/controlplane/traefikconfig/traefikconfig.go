@@ -170,15 +170,19 @@ func Generate(resources []db.ResourceWithTargets) Config {
 				cfg.HTTP.ServersTransports[transportName] = serversTransport{InsecureSkipVerify: true}
 				lb.ServersTransport = transportName
 			}
-			if len(r.Targets) > 1 {
-				// A pool, not a single backend -- pin each client to
-				// whichever server it lands on first, and let Traefik
-				// re-pin to a healthy one automatically on failure
-				// (confirmed behavior, not assumed: Traefik's own docs
-				// state that when the cookie-selected server becomes
-				// unhealthy, the request is forwarded to a new server
-				// and the cookie updated -- but that only happens once
+			if r.Sticky {
+				// Explicit per-resource opt-in (not inferred from
+				// target count) -- pin each client to whichever server
+				// it lands on first, and let Traefik re-pin to a
+				// healthy one automatically on failure (confirmed
+				// behavior, not assumed: Traefik's own docs state that
+				// when the cookie-selected server becomes unhealthy,
+				// the request is forwarded to a new server and the
+				// cookie updated -- but that only happens once
 				// healthCheck is configured too, so both go together).
+				// Matters even for services like Proxmox's own web UI,
+				// which ties its session/auth ticket to whichever node
+				// actually issued it.
 				lb.Sticky = &sticky{Cookie: cookie{Name: "rvtx_lb_" + r.Name}}
 				lb.HealthCheck = &healthCheck{Path: "/", Interval: "10s", Timeout: "3s"}
 			}

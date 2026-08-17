@@ -24,6 +24,7 @@ function NewResourceForm({ nodes, onCreated }) {
   const [certResolver, setCertResolver] = useState('');
   const [targetScheme, setTargetScheme] = useState('http');
   const [targetSkipVerify, setTargetSkipVerify] = useState(false);
+  const [sticky, setSticky] = useState(false);
   const [targets, setTargets] = useState([emptyTarget()]);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -53,10 +54,12 @@ function NewResourceForm({ nodes, onCreated }) {
         cert_resolver: protocol === 'http' && certResolver ? certResolver : undefined,
         target_scheme: protocol === 'http' ? targetScheme : undefined,
         target_skip_verify: protocol === 'http' && targetScheme === 'https' ? targetSkipVerify : undefined,
+        sticky: protocol === 'http' ? sticky : undefined,
         targets: targets.map(targetToPayload),
       });
       setName('');
       setDomain('');
+      setSticky(false);
       setTargetScheme('http');
       setTargetSkipVerify(false);
       setTargets([emptyTarget()]);
@@ -126,6 +129,19 @@ function NewResourceForm({ nodes, onCreated }) {
               </label>
             </div>
           )}
+          <div className="field">
+            <label
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+              title="Pins each client to whichever backend it lands on first, via a cookie. Useful for multi-target pools where a target keeps per-node session state -- e.g. Proxmox's own web UI ties its auth ticket to whichever node issued it."
+            >
+              <input
+                type="checkbox"
+                checked={sticky}
+                onChange={(e) => setSticky(e.target.checked)}
+              />
+              Sticky sessions
+            </label>
+          </div>
         </div>
       )}
 
@@ -291,6 +307,9 @@ export default function Resources() {
                       .join(', ')}
                     {r.protocol === 'http' && r.target_scheme === 'https' && r.target_skip_verify && (
                       <span style={{ color: 'var(--text-dim)' }}> (skip verify)</span>
+                    )}
+                    {r.protocol === 'http' && r.sticky && (
+                      <span style={{ color: 'var(--text-dim)' }}> (sticky)</span>
                     )}
                   </td>
                   {isAdmin && (

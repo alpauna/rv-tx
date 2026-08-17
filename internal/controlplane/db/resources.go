@@ -43,6 +43,7 @@ type ResourceWithTargets struct {
 	CertResolver     *string  `json:"cert_resolver"`
 	TargetScheme     string   `json:"target_scheme"`      // "http" or "https" -- http protocol only, ignored for tcp/udp
 	TargetSkipVerify bool     `json:"target_skip_verify"` // skip TLS verification when TargetScheme is "https" (self-signed backend certs, e.g. Proxmox's own web UI)
+	Sticky           bool     `json:"sticky"`             // http protocol only -- pin each client to whichever backend it lands on first (e.g. Proxmox's own web UI ties its session/auth ticket to one node)
 	Targets          []Target `json:"targets"`
 }
 
@@ -54,7 +55,7 @@ type ResourceWithTargets struct {
 // unbounded pool (any number of targets, role ignored), tcp/udp
 // resources are at most a primary and a backup (not full load
 // balancing yet).
-func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, entryPoint string, certResolver *string, targetScheme string, targetSkipVerify bool, targets []TargetSpec) error {
+func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, entryPoint string, certResolver *string, targetScheme string, targetSkipVerify, sticky bool, targets []TargetSpec) error {
 	if err := validateTargets(protocol, targets); err != nil {
 		return err
 	}
@@ -73,10 +74,10 @@ func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain 
 
 	var resourceID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO resources (name, protocol, domain, entry_point, cert_resolver, target_scheme, target_skip_verify)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO resources (name, protocol, domain, entry_point, cert_resolver, target_scheme, target_skip_verify, sticky)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id::text
-	`, name, protocol, domain, entryPoint, certResolver, targetScheme, targetSkipVerify).Scan(&resourceID)
+	`, name, protocol, domain, entryPoint, certResolver, targetScheme, targetSkipVerify, sticky).Scan(&resourceID)
 	if err != nil {
 		return fmt.Errorf("insert resource: %w", err)
 	}
@@ -180,7 +181,7 @@ func validateTargets(protocol string, targets []TargetSpec) error {
 func (db *DB) ListResourcesWithTargets(ctx context.Context) ([]ResourceWithTargets, error) {
 	rows, err := db.Pool.Query(ctx, `
 		SELECT r.id::text, r.name, r.protocol, r.domain, r.entry_point, r.cert_resolver,
-		       r.target_scheme, r.target_skip_verify,
+		       r.target_scheme, r.target_skip_verify, r.sticky,
 		       COALESCE(host(n.mesh_ip), rt.address), rt.port, rt.role,
 		       (rt.node_id IS NULL), n.last_seen
 		FROM resources r
@@ -201,16 +202,16 @@ func (db *DB) ListResourcesWithTargets(ctx context.Context) ([]ResourceWithTarge
 			id, name, protocol, entryPoint, address, role, targetScheme string
 			domain, certResolver                                        *string
 			port                                                        int
-			targetSkipVerify, external                                  bool
+			targetSkipVerify, sticky, external                          bool
 			lastSeen                                                    *time.Time
 		)
-		if err := rows.Scan(&id, &name, &protocol, &domain, &entryPoint, &certResolver, &targetScheme, &targetSkipVerify, &address, &port, &role, &external, &lastSeen); err != nil {
+		if err := rows.Scan(&id, &name, &protocol, &domain, &entryPoint, &certResolver, &targetScheme, &targetSkipVerify, &sticky, &address, &port, &role, &external, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan resource target: %w", err)
 		}
 
 		r, ok := byID[id]
 		if !ok {
-			r = &ResourceWithTargets{Name: name, Protocol: protocol, Domain: domain, EntryPoint: entryPoint, CertResolver: certResolver, TargetScheme: targetScheme, TargetSkipVerify: targetSkipVerify}
+			r = &ResourceWithTargets{Name: name, Protocol: protocol, Domain: domain, EntryPoint: entryPoint, CertResolver: certResolver, TargetScheme: targetScheme, TargetSkipVerify: targetSkipVerify, Sticky: sticky}
 			byID[id] = r
 			order = append(order, id)
 		}

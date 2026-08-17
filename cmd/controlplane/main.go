@@ -271,6 +271,7 @@ type createResourceRequest struct {
 	CertResolver     string           `json:"cert_resolver,omitempty"`      // http only -- name of a Traefik certificatesResolvers entry (static config)
 	TargetScheme     string           `json:"target_scheme,omitempty"`      // http only -- "http" (default) or "https", for a backend that's itself HTTPS-only (e.g. Proxmox's own web UI)
 	TargetSkipVerify bool             `json:"target_skip_verify,omitempty"` // http+https only -- skip TLS verification for a self-signed backend cert
+	Sticky           bool             `json:"sticky,omitempty"`             // http only -- pin each client to whichever backend it lands on first
 	Targets          []targetSpecJSON `json:"targets"`
 }
 
@@ -307,7 +308,7 @@ func createResourceHandler(database *db.DB) sessionHandler {
 			targets[i] = db.TargetSpec{NodeName: t.NodeName, Address: t.Address, Port: t.Port, Role: t.Role}
 		}
 
-		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, certResolver, req.TargetScheme, req.TargetSkipVerify, targets)
+		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, certResolver, req.TargetScheme, req.TargetSkipVerify, req.Sticky, targets)
 		if err != nil {
 			log.Printf("create resource %q: %v", req.Name, err)
 			http.Error(w, err.Error(), http.StatusBadRequest)

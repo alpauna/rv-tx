@@ -24,6 +24,10 @@ The very first admin account is bootstrapped once, at startup, only when the `us
 
 An `http`-protocol resource's `target_scheme` (`"http"`, the default, or `"https"`) controls how Traefik talks to the *backend*, completely independent of `cert_resolver` (which is about the *client-facing* side — see the ACME notes above). This is what lets a resource point at something that's HTTPS-only with no plain-HTTP listener at all, like Proxmox's own web UI (`:8006`) or TrueNAS. Since most internal appliances like that only ever get a self-signed cert, `target_skip_verify: true` adds a per-resource Traefik `serversTransport` with `insecureSkipVerify: true` — scoped to that one resource's backend connection only, never global, so it can't weaken TLS verification for any other resource's backend or for the client-facing side of any router.
 
+### Sticky sessions are an explicit per-resource opt-in, not inferred from target count
+
+`sticky` used to be implicit — any `http` resource with more than one target automatically got a load-balancer cookie. That's gone; it's now a real checkbox on the New Resource form (`sticky: true`/`false` in the API), independent of how many targets a resource has. Matters most for something like a multi-node Proxmox cluster used as one resource's target pool: Proxmox's own web UI ties its session/auth ticket to whichever node actually issued it, so without sticky sessions, round-robin load balancing would randomly break the UI mid-session. Sticky is allowed even on a single-target resource (harmless, simpler than special-casing it away) — verified live, both directions: a single-target resource with the box checked gets the cookie, a multi-target resource *without* it checked gets plain round-robin with no cookie at all.
+
 ### Multiple DNS names for one resource — what Traefik can and can't do
 
 Traefik's own automatic ACME domain detection only reads a router's `Host()` rule — it can't request a cert for anything a `Host()` rule doesn't literally spell out, so out of the box one resource means one exact hostname. Two things this project adds on top of that, both in `internal/controlplane/traefikconfig`:
@@ -63,6 +67,7 @@ Both images build and the control plane has been smoke-tested end-to-end in a co
 8. Per-user accounts, roles, and email-based invite/password-reset — done, verified live end-to-end (invite → set password → login, forgot-password → reset → login with new password, and viewer-role 403s on every mutating route)
 9. Docker packaging for both the control plane and the agent — done, both images build and the control plane is smoke-tested in a container; not yet used to replace the production systemd deployments
 10. HTTPS backend targets + self-signed skip-verify — done, verified live against a real self-signed target (Proxmox's own web UI)
+11. Sticky sessions as an explicit per-resource checkbox, decoupled from target count — done, verified live in both directions
 
 ## Known gaps
 

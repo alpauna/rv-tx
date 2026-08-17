@@ -68,6 +68,7 @@ func TestGenerate_HTTPMultiTargetSticky(t *testing.T) {
 	cfg := Generate([]db.ResourceWithTargets{
 		{
 			Name: "proxmox-ui", Protocol: "http", Domain: strPtr("pve.example.com"), EntryPoint: "web",
+			Sticky: true,
 			Targets: []db.Target{
 				{Address: "100.100.0.1", Port: 8006, Role: "primary"},
 				{Address: "100.100.0.2", Port: 8006, Role: "primary"},
@@ -85,6 +86,46 @@ func TestGenerate_HTTPMultiTargetSticky(t *testing.T) {
 	}
 	if svc.LoadBalancer.HealthCheck == nil || svc.LoadBalancer.HealthCheck.Path != "/" {
 		t.Errorf("expected healthCheck with path \"/\", got %+v", svc.LoadBalancer.HealthCheck)
+	}
+}
+
+func TestGenerate_HTTPMultiTargetWithoutStickyOptIn(t *testing.T) {
+	// Sticky is an explicit per-resource opt-in now, not inferred from
+	// having more than one target -- a multi-target resource that
+	// didn't check the box gets plain round-robin, no cookie.
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "app-pool", Protocol: "http", Domain: strPtr("app.example.com"), EntryPoint: "web",
+			Targets: []db.Target{
+				{Address: "100.100.0.1", Port: 8000, Role: "primary"},
+				{Address: "100.100.0.2", Port: 8000, Role: "primary"},
+			},
+		},
+	})
+
+	svc := cfg.HTTP.Services["app-pool"]
+	if svc.LoadBalancer.Sticky != nil {
+		t.Errorf("expected no sticky cookie without opting in, got %+v", svc.LoadBalancer.Sticky)
+	}
+	if svc.LoadBalancer.HealthCheck != nil {
+		t.Errorf("expected no healthCheck without sticky, got %+v", svc.LoadBalancer.HealthCheck)
+	}
+}
+
+func TestGenerate_HTTPSingleTargetSticky(t *testing.T) {
+	// Sticky is allowed even with one target -- harmless, and simpler
+	// than special-casing it away.
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "solo", Protocol: "http", Domain: strPtr("solo.example.com"), EntryPoint: "web",
+			Sticky:  true,
+			Targets: []db.Target{{Address: "100.100.0.1", Port: 8000, Role: "primary"}},
+		},
+	})
+
+	svc := cfg.HTTP.Services["solo"]
+	if svc.LoadBalancer.Sticky == nil {
+		t.Error("expected a sticky cookie even for a single-target resource that opted in")
 	}
 }
 
