@@ -10,7 +10,15 @@ A custom HA Traefik-based reverse-proxy/tunnel control plane, replacing Pangolin
 
 Resources can target either a mesh node (`node_name`) or a raw external `ip:port` that never joins the mesh (`address`) — the latter is how the rv-tx.com DNS relay (below) reaches BIND9 without those boxes needing to join the mesh at all.
 
-- `dashboard/` — a React+Vite SPA, embedded into the control plane binary via `embed.FS` (`dashboard/embed.go`) and served at `/`. Everything under `/api/*` requires a session cookie (single shared bcrypt-hashed password, `RVTX_DASHBOARD_PASSWORD_HASH`/`RVTX_SESSION_SECRET`); `/ws/agent`, `/healthz`, and `/traefik/config` stay unauthenticated by design (agents and Traefik itself can't send credentials). `dashboard/dist/` is gitignored (build output) but must exist before `go build ./cmd/controlplane` will produce a real dashboard — run `npm --prefix dashboard ci && npm --prefix dashboard run build` first on a fresh clone.
+- `dashboard/` — a React+Vite SPA, embedded into the control plane binary via `embed.FS` (`dashboard/embed.go`) and served at `/`. Everything under `/api/*` requires a session cookie proving a real per-user login (see "Accounts, roles, and email" below); `/ws/agent`, `/healthz`, and `/traefik/config` stay unauthenticated by design (agents and Traefik itself can't send credentials). `dashboard/dist/` is gitignored (build output) but must exist before `go build ./cmd/controlplane` will produce a real dashboard — run `npm --prefix dashboard ci && npm --prefix dashboard run build` first on a fresh clone.
+
+### Accounts, roles, and email
+
+No open signup — every account is created by an admin inviting an email address (`POST /api/users`), which emails a one-time link (7-day expiry) to set a password. Two roles: `admin` (full read/write, including managing other users) and `viewer` (read-only — every mutating `/api/*` route 403s for a viewer session, enforced server-side in `requireAdmin`, not just hidden in the UI). Forgot-password works the same way (1-hour token) and deliberately returns an identical response whether or not the email is registered, so it can't be used to enumerate accounts.
+
+Session cookies carry `{email, role, exp}` in the signed payload (`internal/controlplane/auth`) instead of a bare authenticated/not boolean — `GET /api/whoami` is how the SPA learns who's logged in on page load, since the cookie itself is HttpOnly and unreadable from JS.
+
+The very first admin account is bootstrapped once, at startup, only when the `users` table is empty (`RVTX_BOOTSTRAP_ADMIN_EMAIL` + the pre-existing `RVTX_DASHBOARD_PASSWORD_HASH` from before per-user accounts existed) — every account after that goes through the normal invite flow. Email delivery config (`RVTX_SMTP_SERVER`/`PORT`/`USER`/`PASSWORD`/`FROM`) is reused verbatim from the `dnsmasq-ui` project's own `smtp.env` — same relay, same credentials, no new provisioning.
 
 ### Multiple DNS names for one resource — what Traefik can and can't do
 
@@ -39,6 +47,7 @@ What Traefik has no concept of at all: one resource serving multiple *unrelated*
 5. Self-hosted DNS-01 for `rv-tx.com` on the internal BIND9 cluster — done, `rv-tx.com` is genuinely delegated (confirmed at the authoritative `.com` registry, not just cached resolvers) to `ns1.rv-tx.com`/`ns2.rv-tx.com` (see dnsmasq-ui project's own memory/commits for the BIND9-side half of this work)
 6. ACME DNS-01 automation via Traefik's native `rfc2136` provider — done, a real Let's Encrypt staging certificate has been obtained end-to-end through the real delegated zone (see the operational notes below for two real bugs found along the way)
 7. Dashboard (React SPA, embedded + auth) + wildcard-domain support — done, `rv-tx.com`/`*.rv-tx.com` both serve the dashboard over real production HTTPS
+8. Per-user accounts, roles, and email-based invite/password-reset — done, verified live end-to-end (invite → set password → login, forgot-password → reset → login with new password, and viewer-role 403s on every mutating route)
 
 ## Known gaps
 
@@ -132,6 +141,12 @@ Confirmed directly against lego's source (bundled with Traefik 3.6.25) rather th
 ### SSH also mangles `$` in values passed as command-line arguments
 
 A related trap while deploying the above: `ssh host bash -s -- "$HASH" "$SECRET" <<'EOF'` looked safe (the heredoc is quoted, so no *local* re-expansion) but still corrupted the hash, because OpenSSH's client joins all trailing arguments into a single string and sends that to the *remote* shell to parse before `bash -s` ever runs — so `$2a$10$...` gets `$`-expanded a second time, remotely, regardless of local quoting. There's no clean way to pass a `$`-containing secret as an SSH command-line argument. Fixed by writing the value to a local file and `scp`-ing it directly instead — no shell ever re-parses the content.
+
+### `http.FileServer`'s SPA-fallback trick silently breaks any route deeper than `/`
+
+The original SPA fallback rewrote an unmatched request's path to `/index.html` and re-invoked `http.FileServer` on it. That's a real, documented `http.FileServer` quirk waiting to bite: a literal `/index.html` request gets 301-redirected to `./` (its own special-case for "you don't need to spell out index.html"), and that redirect's `Location: ./` is relative to the *original* request path, not root. So `/accept-invite` (a real client-side route, an emailed invite link) resolved `./` against `/accept-invite`'s own directory and landed back at `/` — invisible for the root path itself (`/` redirecting to `/` looks like nothing happened), but silently broke every other client-side route, confirmed live: an invite link bounced straight to the login page instead of the accept-invite form. Fixed in `spaHandler()` by reading `index.html`'s bytes once at startup and serving them directly via `http.ServeContent` on a fallback, rather than ever asking `http.FileServer` to handle a path named exactly `index.html`. Worth remembering for any Go SPA fallback: never rewrite the request path to literally `index.html` and hand it back to `http.FileServer` — serve the content directly instead.
+
+**A second, unrelated trap this exposed while testing the fix**: browsers cache 301 redirects aggressively and keyed to the exact URL (including query string) — after the bug above was fixed server-side, the *same browser tab* that had hit the broken link once kept re-applying the stale cached redirect locally, never even re-requesting the now-fixed URL from the server. A private/incognito window (no cache) confirmed the fix immediately; the regular tab needed a hard cache-clear for that specific URL. Any future SPA-fallback bug fix should be verified from a clean cache/incognito window, not the same tab that observed the original bug.
 
 ### dnsmasq drift can silently break BIND9's TCP:53 (AXFR) fleet-wide
 
