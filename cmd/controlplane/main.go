@@ -85,10 +85,15 @@ type createResourceRequest struct {
 	Targets    []targetSpecJSON `json:"targets"`
 }
 
+// targetSpecJSON: exactly one of NodeName or Address must be set --
+// NodeName resolves to an rv-tx mesh node's live mesh_ip, Address is
+// used as-is for a target that isn't a mesh member (e.g. a raw LAN IP
+// already reachable from wherever Traefik runs).
 type targetSpecJSON struct {
-	NodeName string `json:"node_name"`
+	NodeName string `json:"node_name,omitempty"`
+	Address  string `json:"address,omitempty"`
 	Port     int    `json:"port"`
-	Role     string `json:"role,omitempty"` // "primary" or "backup"; omit for http (ignored) or a single tcp target (defaults to "primary")
+	Role     string `json:"role,omitempty"` // "primary" or "backup"; omit for http (ignored) or a single tcp/udp target (defaults to "primary")
 }
 
 func createResourceHandler(database *db.DB) http.HandlerFunc {
@@ -111,7 +116,7 @@ func createResourceHandler(database *db.DB) http.HandlerFunc {
 
 		targets := make([]db.TargetSpec, len(req.Targets))
 		for i, t := range req.Targets {
-			targets[i] = db.TargetSpec{NodeName: t.NodeName, Port: t.Port, Role: t.Role}
+			targets[i] = db.TargetSpec{NodeName: t.NodeName, Address: t.Address, Port: t.Port, Role: t.Role}
 		}
 
 		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, targets)

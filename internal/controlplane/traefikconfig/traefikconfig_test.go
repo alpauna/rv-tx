@@ -14,7 +14,7 @@ func TestGenerate_HTTP(t *testing.T) {
 	cfg := Generate([]db.ResourceWithTargets{
 		{
 			Name: "app", Protocol: "http", Domain: strPtr("app.example.com"), EntryPoint: "web",
-			Targets: []db.Target{{MeshIP: "100.100.0.1", Port: 8000, Role: "primary"}},
+			Targets: []db.Target{{Address: "100.100.0.1", Port: 8000, Role: "primary"}},
 		},
 	})
 
@@ -51,9 +51,9 @@ func TestGenerate_HTTPMultiTargetSticky(t *testing.T) {
 		{
 			Name: "proxmox-ui", Protocol: "http", Domain: strPtr("pve.example.com"), EntryPoint: "web",
 			Targets: []db.Target{
-				{MeshIP: "100.100.0.1", Port: 8006, Role: "primary"},
-				{MeshIP: "100.100.0.2", Port: 8006, Role: "primary"},
-				{MeshIP: "100.100.0.3", Port: 8006, Role: "primary"},
+				{Address: "100.100.0.1", Port: 8006, Role: "primary"},
+				{Address: "100.100.0.2", Port: 8006, Role: "primary"},
+				{Address: "100.100.0.3", Port: 8006, Role: "primary"},
 			},
 		},
 	})
@@ -74,7 +74,7 @@ func TestGenerate_TCPCatchAll(t *testing.T) {
 	cfg := Generate([]db.ResourceWithTargets{
 		{
 			Name: "raw", Protocol: "tcp", Domain: nil, EntryPoint: "raw-tcp",
-			Targets: []db.Target{{MeshIP: "100.100.0.2", Port: 9000, Role: "primary"}},
+			Targets: []db.Target{{Address: "100.100.0.2", Port: 9000, Role: "primary"}},
 		},
 	})
 
@@ -102,8 +102,8 @@ func TestGenerate_TCPPrimaryBackup(t *testing.T) {
 		{
 			Name: "raw", Protocol: "tcp", EntryPoint: "raw-tcp",
 			Targets: []db.Target{
-				{MeshIP: "100.100.0.1", Port: 9000, Role: "primary", LastSeen: fresh},
-				{MeshIP: "100.100.0.2", Port: 9000, Role: "backup", LastSeen: fresh},
+				{Address: "100.100.0.1", Port: 9000, Role: "primary", LastSeen: fresh},
+				{Address: "100.100.0.2", Port: 9000, Role: "backup", LastSeen: fresh},
 			},
 		},
 	})
@@ -115,8 +115,8 @@ func TestGenerate_TCPPrimaryBackup(t *testing.T) {
 		{
 			Name: "raw", Protocol: "tcp", EntryPoint: "raw-tcp",
 			Targets: []db.Target{
-				{MeshIP: "100.100.0.1", Port: 9000, Role: "primary", LastSeen: stale},
-				{MeshIP: "100.100.0.2", Port: 9000, Role: "backup", LastSeen: fresh},
+				{Address: "100.100.0.1", Port: 9000, Role: "primary", LastSeen: stale},
+				{Address: "100.100.0.2", Port: 9000, Role: "backup", LastSeen: fresh},
 			},
 		},
 	})
@@ -129,9 +129,53 @@ func TestGenerate_TCPPrimaryBackup(t *testing.T) {
 	}
 }
 
+func TestGenerate_UDP(t *testing.T) {
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "dns-udp", Protocol: "udp", EntryPoint: "dns-udp",
+			Targets: []db.Target{{Address: "192.168.7.242", Port: 53, Role: "primary", External: true}},
+		},
+	})
+
+	if cfg.UDP == nil {
+		t.Fatal("expected UDP config, got nil")
+	}
+	if cfg.HTTP != nil || cfg.TCP != nil {
+		t.Fatal("expected no HTTP/TCP config for a udp-only resource")
+	}
+	r, ok := cfg.UDP.Routers["dns-udp"]
+	if !ok {
+		t.Fatal("expected router \"dns-udp\"")
+	}
+	if r.Service != "dns-udp" || r.EntryPoints[0] != "dns-udp" {
+		t.Errorf("got router %+v", r)
+	}
+	svc := cfg.UDP.Services["dns-udp"]
+	if svc.LoadBalancer.Servers[0].Address != "192.168.7.242:53" {
+		t.Errorf("got server %+v", svc.LoadBalancer.Servers[0])
+	}
+}
+
+func TestGenerate_ExternalTargetAlwaysPreferred(t *testing.T) {
+	// An external primary has no heartbeat to go stale -- it should
+	// always be preferred over the backup, unlike a node-backed primary.
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "dns-tcp", Protocol: "tcp", EntryPoint: "dns-tcp",
+			Targets: []db.Target{
+				{Address: "192.168.7.242", Port: 53, Role: "primary", External: true, LastSeen: nil},
+				{Address: "192.168.7.243", Port: 53, Role: "backup", External: true, LastSeen: nil},
+			},
+		},
+	})
+	if got := cfg.TCP.Services["dns-tcp"].LoadBalancer.Servers[0].Address; got != "192.168.7.242:53" {
+		t.Errorf("expected external primary to always be preferred, got %q", got)
+	}
+}
+
 func TestGenerate_Empty(t *testing.T) {
 	cfg := Generate(nil)
-	if cfg.HTTP != nil || cfg.TCP != nil {
-		t.Errorf("expected both nil for no resources, got %+v", cfg)
+	if cfg.HTTP != nil || cfg.TCP != nil || cfg.UDP != nil {
+		t.Errorf("expected all nil for no resources, got %+v", cfg)
 	}
 }

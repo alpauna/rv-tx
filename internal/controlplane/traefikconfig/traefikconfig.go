@@ -10,20 +10,22 @@ import (
 	"rv-tx/internal/controlplane/db"
 )
 
-// primaryFreshness is how recent a tcp primary target's node last_seen
-// must be to still be considered up. 3x the agent's default 15s
-// heartbeat interval -- generous enough to tolerate a couple of missed
-// beats without flapping. This is node/mesh-level liveness (proves the
-// primary's node is still in the mesh), not a check of the specific
-// target port's application -- a coarse signal, deliberately, for this
-// pass. Real per-port health (via Traefik's own tcp healthCheck) and
-// true client-IP-hash affinity for genuine multi-way TCP/UDP load
-// balancing are both deferred, not solved here.
+// primaryFreshness is how recent a tcp/udp primary target's node
+// last_seen must be to still be considered up. 3x the agent's default
+// 15s heartbeat interval -- generous enough to tolerate a couple of
+// missed beats without flapping. This is node/mesh-level liveness
+// (proves the primary's node is still in the mesh), not a check of the
+// specific target port's application -- a coarse signal, deliberately,
+// for this pass. Doesn't apply to external (non-mesh) targets at all --
+// see selectMasterBackupTarget. Real per-port health (via Traefik's own
+// healthCheck) and true client-IP-hash affinity for genuine multi-way
+// TCP/UDP load balancing are both deferred, not solved here.
 const primaryFreshness = 45 * time.Second
 
 type Config struct {
-	HTTP *protocolConfig `json:"http,omitempty"`
-	TCP  *protocolConfig `json:"tcp,omitempty"`
+	HTTP *protocolConfig    `json:"http,omitempty"`
+	TCP  *protocolConfig    `json:"tcp,omitempty"`
+	UDP  *udpProtocolConfig `json:"udp,omitempty"`
 }
 
 type protocolConfig struct {
@@ -62,12 +64,26 @@ type healthCheck struct {
 }
 
 // server holds either URL (HTTP, e.g. "http://10.0.0.1:8000") or
-// Address (TCP, e.g. "10.0.0.1:9000") -- Traefik expects different
+// Address (TCP/UDP, e.g. "10.0.0.1:9000") -- Traefik expects different
 // field names per protocol, only one is ever populated for a given
 // entry depending which slice it's built into.
 type server struct {
 	URL     string `json:"url,omitempty"`
 	Address string `json:"address,omitempty"`
+}
+
+// udpProtocolConfig mirrors protocolConfig but UDP routers have no
+// "rule" field at all (confirmed via Traefik's docs -- UDP routers
+// don't support rules, unlike HTTP's Host() or TCP's HostSNI()), so
+// they need a distinct router shape rather than reusing router.
+type udpProtocolConfig struct {
+	Routers  map[string]udpRouter `json:"routers"`
+	Services map[string]service   `json:"services"`
+}
+
+type udpRouter struct {
+	Service     string   `json:"service"`
+	EntryPoints []string `json:"entryPoints"`
 }
 
 // Generate builds the full dynamic config from every resource. Resource
@@ -94,7 +110,7 @@ func Generate(resources []db.ResourceWithTargets) Config {
 
 			servers := make([]server, len(r.Targets))
 			for i, t := range r.Targets {
-				servers[i] = server{URL: fmt.Sprintf("http://%s:%d", t.MeshIP, t.Port)}
+				servers[i] = server{URL: fmt.Sprintf("http://%s:%d", t.Address, t.Port)}
 			}
 			lb := loadBalancer{Servers: servers}
 			if len(r.Targets) > 1 {
@@ -128,10 +144,26 @@ func Generate(resources []db.ResourceWithTargets) Config {
 				EntryPoints: []string{r.EntryPoint},
 			}
 
-			target := selectTCPTarget(r.Targets)
+			target := selectMasterBackupTarget(r.Targets)
 			cfg.TCP.Services[r.Name] = service{
 				LoadBalancer: loadBalancer{
-					Servers: []server{{Address: fmt.Sprintf("%s:%d", target.MeshIP, target.Port)}},
+					Servers: []server{{Address: fmt.Sprintf("%s:%d", target.Address, target.Port)}},
+				},
+			}
+
+		case "udp":
+			if cfg.UDP == nil {
+				cfg.UDP = &udpProtocolConfig{Routers: map[string]udpRouter{}, Services: map[string]service{}}
+			}
+			cfg.UDP.Routers[r.Name] = udpRouter{
+				Service:     r.Name,
+				EntryPoints: []string{r.EntryPoint},
+			}
+
+			target := selectMasterBackupTarget(r.Targets)
+			cfg.UDP.Services[r.Name] = service{
+				LoadBalancer: loadBalancer{
+					Servers: []server{{Address: fmt.Sprintf("%s:%d", target.Address, target.Port)}},
 				},
 			}
 		}
@@ -140,11 +172,16 @@ func Generate(resources []db.ResourceWithTargets) Config {
 	return cfg
 }
 
-// selectTCPTarget implements the simple master/backup priority Traefik
-// doesn't provide natively for TCP services: prefer the primary target
-// as long as its node's mesh heartbeat is fresh, otherwise fall back to
-// the backup. With only one target, there's nothing to choose between.
-func selectTCPTarget(targets []db.Target) db.Target {
+// selectMasterBackupTarget implements the simple master/backup priority
+// Traefik doesn't provide natively for TCP/UDP services: prefer the
+// primary target as long as its node's mesh heartbeat is fresh,
+// otherwise fall back to the backup. An external (non-mesh) primary has
+// no heartbeat to check at all -- it's always preferred, since there's
+// no liveness signal available here to fall back on (Traefik's own
+// healthCheck, if configured on the entrypoint, is the real liveness
+// mechanism for that case). With only one target, there's nothing to
+// choose between.
+func selectMasterBackupTarget(targets []db.Target) db.Target {
 	if len(targets) == 1 {
 		return targets[0]
 	}
@@ -159,6 +196,9 @@ func selectTCPTarget(targets []db.Target) db.Target {
 		}
 	}
 
+	if primary.External {
+		return primary
+	}
 	if primary.LastSeen != nil && time.Since(*primary.LastSeen) <= primaryFreshness {
 		return primary
 	}
