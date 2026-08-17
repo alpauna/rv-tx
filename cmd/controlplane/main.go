@@ -5,11 +5,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 
 	"rv-tx/internal/controlplane/db"
+	"rv-tx/internal/controlplane/traefikconfig"
 	"rv-tx/internal/controlplane/wsserver"
 )
 
@@ -40,10 +42,74 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/traefik/config", traefikConfigHandler(database))
+	mux.HandleFunc("/resources", createResourceHandler(database))
 
 	log.Printf("control plane listening on %s (mesh cidr %s)", listenAddr, meshCIDR)
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatalf("http server: %v", err)
+	}
+}
+
+// traefikConfigHandler serves Traefik's dynamic config JSON -- this is
+// what Traefik's `http` provider polls (traefik.yml:
+// `providers.http.endpoint`).
+func traefikConfigHandler(database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resources, err := database.ListResourcesWithNodes(r.Context())
+		if err != nil {
+			log.Printf("list resources for traefik config: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		cfg := traefikconfig.Generate(resources)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(cfg); err != nil {
+			log.Printf("encode traefik config: %v", err)
+		}
+	}
+}
+
+// createResourceRequest is the POST /resources body. No auth/dashboard
+// yet for this milestone -- deliberately minimal, matching milestone
+// 1's own no-auth scope for the same reason (a real auth layer is
+// separate future work, not blocking mesh/Traefik-config proof).
+type createResourceRequest struct {
+	Name           string `json:"name"`
+	Protocol       string `json:"protocol"`
+	Domain         string `json:"domain,omitempty"`
+	TargetNodeName string `json:"target_node_name"`
+	TargetPort     int    `json:"target_port"`
+	EntryPoint     string `json:"entry_point"`
+}
+
+func createResourceHandler(database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req createResourceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		var domain *string
+		if req.Domain != "" {
+			domain = &req.Domain
+		}
+
+		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain,
+			req.TargetNodeName, req.TargetPort, req.EntryPoint)
+		if err != nil {
+			log.Printf("create resource %q: %v", req.Name, err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
 	}
 }
 
