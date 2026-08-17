@@ -62,36 +62,43 @@ func (db *DB) UsedMeshIPs(ctx context.Context) ([]string, error) {
 }
 
 // UpsertNode registers a node by (name, public_key) unique keys: if a
-// node with this name already exists, its public_key/mesh_ip are updated
-// in place (handles an agent re-registering, e.g. after a reinstall)
-// rather than allocating a second identity for the same operator-chosen
-// name. Returns the node's final mesh_ip.
-func (db *DB) UpsertNode(ctx context.Context, name, publicKey, meshIP string) (string, error) {
+// node with this name already exists, its public_key/mesh_ip/endpoint
+// are updated in place (handles an agent re-registering, e.g. after a
+// reinstall or reconnect from a new network) rather than allocating a
+// second identity for the same operator-chosen name. endpoint is set
+// atomically here rather than waiting for a separate heartbeat, since
+// it's already known (auto-detected or overridden) by the time
+// register is handled -- closes a small gap where a freshly registered
+// node previously had no endpoint until its first heartbeat landed.
+// Returns the node's final mesh_ip.
+func (db *DB) UpsertNode(ctx context.Context, name, publicKey, meshIP, endpoint string) (string, error) {
 	var finalMeshIP string
 	err := db.Pool.QueryRow(ctx, `
-		INSERT INTO nodes (name, public_key, mesh_ip, last_seen)
-		VALUES ($1, $2, $3, now())
+		INSERT INTO nodes (name, public_key, mesh_ip, last_endpoint, last_seen)
+		VALUES ($1, $2, $3, $4, now())
 		ON CONFLICT (name) DO UPDATE
 			SET public_key = EXCLUDED.public_key,
+			    last_endpoint = EXCLUDED.last_endpoint,
 			    last_seen = now()
 		RETURNING host(mesh_ip)
-	`, name, publicKey, meshIP).Scan(&finalMeshIP)
+	`, name, publicKey, meshIP, endpoint).Scan(&finalMeshIP)
 	if err != nil {
 		return "", fmt.Errorf("upsert node: %w", err)
 	}
 	return finalMeshIP, nil
 }
 
-// UpdateHeartbeat records a node's latest reachable endpoint and refreshes
-// last_seen, keyed by public_key (what the agent proves ownership of on
-// every message this milestone -- no separate auth token yet).
-func (db *DB) UpdateHeartbeat(ctx context.Context, publicKey, endpoint string) error {
+// TouchLastSeen refreshes a node's liveness timestamp on each
+// heartbeat, keyed by public_key (what the agent proves ownership of
+// on every message this milestone -- no separate auth token yet).
+// Endpoint is not touched here -- it's fixed at register time.
+func (db *DB) TouchLastSeen(ctx context.Context, publicKey string) error {
 	_, err := db.Pool.Exec(ctx, `
-		UPDATE nodes SET last_endpoint = $2, last_seen = now()
+		UPDATE nodes SET last_seen = now()
 		WHERE public_key = $1
-	`, publicKey, endpoint)
+	`, publicKey)
 	if err != nil {
-		return fmt.Errorf("update heartbeat: %w", err)
+		return fmt.Errorf("touch last seen: %w", err)
 	}
 	return nil
 }

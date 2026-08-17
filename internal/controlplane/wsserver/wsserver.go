@@ -10,7 +10,9 @@ package wsserver
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 
@@ -55,6 +57,14 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var publicKey string
 
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// RemoteAddr is always host:port for a real TCP connection;
+		// this would only trip on a malformed/unexpected transport.
+		log.Printf("could not parse remote addr %q: %v", r.RemoteAddr, err)
+		remoteHost = r.RemoteAddr
+	}
+
 	for {
 		var env protocol.Envelope
 		if err := conn.ReadJSON(&env); err != nil {
@@ -70,7 +80,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			publicKey = p.PublicKey
-			if err := s.handleRegister(ctx, conn, p); err != nil {
+			if err := s.handleRegister(ctx, conn, remoteHost, p); err != nil {
 				log.Printf("register failed for %q: %v", p.Name, err)
 				continue
 			}
@@ -80,12 +90,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 				log.Printf("heartbeat before register, dropping")
 				continue
 			}
-			var p protocol.HeartbeatPayload
-			if err := protocol.DecodePayload(env, &p); err != nil {
-				log.Printf("bad heartbeat payload: %v", err)
-				continue
-			}
-			if err := s.handleHeartbeat(ctx, publicKey, p); err != nil {
+			if err := s.handleHeartbeat(ctx, publicKey); err != nil {
 				log.Printf("heartbeat failed for %q: %v", publicKey, err)
 			}
 
@@ -101,7 +106,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleRegister(ctx context.Context, conn *websocket.Conn, p protocol.RegisterPayload) error {
+func (s *Server) handleRegister(ctx context.Context, conn *websocket.Conn, remoteHost string, p protocol.RegisterPayload) error {
 	used, err := s.DB.UsedMeshIPs(ctx)
 	if err != nil {
 		return err
@@ -111,11 +116,21 @@ func (s *Server) handleRegister(ctx context.Context, conn *websocket.Conn, p pro
 		return err
 	}
 
+	var endpoint string
+	if p.Endpoint != "" {
+		endpoint = p.Endpoint
+		log.Printf("endpoint override supplied for %q: %s", p.Name, endpoint)
+	} else {
+		endpoint = fmt.Sprintf("%s:%d", remoteHost, p.Port)
+		log.Printf("endpoint auto-detected from connection for %q: %s", p.Name, endpoint)
+	}
+
 	// UpsertNode is keyed on name: if this node already has an assigned
 	// mesh_ip from a prior registration, that existing IP wins over
-	// candidateIP (ON CONFLICT DO UPDATE only touches public_key/last_seen,
-	// not mesh_ip) -- candidateIP is only actually used for brand new nodes.
-	meshIP, err := s.DB.UpsertNode(ctx, p.Name, p.PublicKey, candidateIP)
+	// candidateIP (ON CONFLICT DO UPDATE only touches public_key/
+	// last_endpoint/last_seen, not mesh_ip) -- candidateIP is only
+	// actually used for brand new nodes.
+	meshIP, err := s.DB.UpsertNode(ctx, p.Name, p.PublicKey, candidateIP, endpoint)
 	if err != nil {
 		return err
 	}
@@ -143,8 +158,8 @@ func (s *Server) handleRegister(ctx context.Context, conn *websocket.Conn, p pro
 	return nil
 }
 
-func (s *Server) handleHeartbeat(ctx context.Context, publicKey string, p protocol.HeartbeatPayload) error {
-	if err := s.DB.UpdateHeartbeat(ctx, publicKey, p.Endpoint); err != nil {
+func (s *Server) handleHeartbeat(ctx context.Context, publicKey string) error {
+	if err := s.DB.TouchLastSeen(ctx, publicKey); err != nil {
 		return err
 	}
 	nodes, err := s.DB.ListNodes(ctx)

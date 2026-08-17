@@ -23,8 +23,13 @@ type Client struct {
 	PublicKey         string
 	ListenPort        int
 	HeartbeatInterval time.Duration
-	Endpoint          string // this milestone: operator-configured, no auto-discovery yet
-	WG                *wgmanager.Manager
+	// EndpointOverride is optional -- leave empty to let the control
+	// plane auto-detect the endpoint from the connection's source IP
+	// plus ListenPort. Only set this for NAT cases auto-detection can't
+	// handle (asymmetric/symmetric NAT where the outbound UDP mapping
+	// differs from the TCP connection's source port).
+	EndpointOverride string
+	WG               *wgmanager.Manager
 }
 
 // Run connects and reconnects forever with exponential backoff (capped),
@@ -69,6 +74,8 @@ func (c *Client) connectOnce(ctx context.Context) error {
 		Payload: protocol.RegisterPayload{
 			Name:      c.Name,
 			PublicKey: c.PublicKey,
+			Port:      c.ListenPort,
+			Endpoint:  c.EndpointOverride,
 		},
 	}); err != nil {
 		return err
@@ -135,7 +142,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, conn *websocket.Conn) {
 		case <-ticker.C:
 			err := conn.WriteJSON(protocol.Envelope{
 				Type:    protocol.TypeHeartbeat,
-				Payload: protocol.HeartbeatPayload{Endpoint: c.Endpoint},
+				Payload: protocol.HeartbeatPayload{},
 			})
 			if err != nil {
 				log.Printf("heartbeat send failed: %v", err)

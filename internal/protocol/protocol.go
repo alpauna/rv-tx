@@ -27,9 +27,19 @@ type Envelope struct {
 }
 
 // RegisterPayload is sent by an agent immediately after connecting.
+// Port is the agent's local WireGuard listen port -- combined with the
+// control plane's own view of the connection's source IP, this is
+// enough to auto-detect a correct endpoint without operator config for
+// the common case (LAN hosts, hosts with a routable IP and no
+// unpredictable NAT port remapping). Endpoint is an optional manual
+// override for cases that don't hold (asymmetric/symmetric NAT where
+// the outbound UDP mapping differs from the TCP connection's source
+// port) -- if set, it wins over auto-detection.
 type RegisterPayload struct {
 	Name      string `json:"name"`
 	PublicKey string `json:"public_key"`
+	Port      int    `json:"port"`
+	Endpoint  string `json:"endpoint,omitempty"`
 }
 
 // RegisteredPayload is the control plane's reply to Register: the mesh
@@ -39,11 +49,11 @@ type RegisteredPayload struct {
 	Peers  []PeerInfo `json:"peers"`
 }
 
-// HeartbeatPayload is sent periodically by an agent to report its
-// current best-guess reachable endpoint.
-type HeartbeatPayload struct {
-	Endpoint string `json:"endpoint"`
-}
+// HeartbeatPayload is sent periodically by an agent purely as a
+// liveness ping -- endpoint is fixed at register time (see
+// RegisterPayload), since every reconnect re-registers, so there's
+// nothing else to carry here.
+type HeartbeatPayload struct{}
 
 // PeerListPayload carries the full current set of mesh peers (excluding
 // the receiving node itself).

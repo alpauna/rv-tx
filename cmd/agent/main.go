@@ -19,7 +19,10 @@ import (
 func main() {
 	controlPlaneURL := requireEnv("RVTX_CONTROLPLANE_URL")
 	name := requireEnv("RVTX_NODE_NAME")
-	endpoint := requireEnv("RVTX_ENDPOINT") // this milestone: operator-configured, e.g. "1.2.3.4:51820"
+	// Optional -- leave unset to let the control plane auto-detect the
+	// endpoint from the connection's source IP + RVTX_LISTEN_PORT. Only
+	// needed for NAT cases auto-detection can't handle.
+	endpointOverride := envOr("RVTX_ENDPOINT_OVERRIDE", "")
 	iface := envOr("RVTX_INTERFACE", "rvtx0")
 	keyPath := envOr("RVTX_KEY_PATH", "/etc/rvtx/private.key")
 	listenPort := envOrInt("RVTX_LISTEN_PORT", 51820)
@@ -40,7 +43,7 @@ func main() {
 		PublicKey:         publicKey,
 		ListenPort:        listenPort,
 		HeartbeatInterval: time.Duration(heartbeatSeconds) * time.Second,
-		Endpoint:          endpoint,
+		EndpointOverride:  endpointOverride,
 		WG:                wg,
 	}
 
