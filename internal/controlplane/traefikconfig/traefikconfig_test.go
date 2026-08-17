@@ -88,6 +88,41 @@ func TestGenerate_HTTPMultiTargetSticky(t *testing.T) {
 	}
 }
 
+func TestGenerate_HTTPWildcardDomain(t *testing.T) {
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "dashboard-wildcard", Protocol: "http", Domain: strPtr("*.rv-tx.com"), EntryPoint: "websecure",
+			Targets: []db.Target{{Address: "100.100.0.1", Port: 8080, Role: "primary"}},
+		},
+	})
+
+	r := cfg.HTTP.Routers["dashboard-wildcard"]
+	want := "HostRegexp(`^[^.]+\\.rv-tx\\.com$`)"
+	if r.Rule != want {
+		t.Errorf("got rule %q, want %q", r.Rule, want)
+	}
+}
+
+func TestGenerate_HTTPWildcardDomainExplicitTLSDomain(t *testing.T) {
+	// A HostRegexp() rule (what a wildcard domain compiles to) can't be
+	// parsed by Traefik's automatic ACME domain detection -- without an
+	// explicit tls.domains entry, a wildcard router's cert resolver
+	// would never actually request a certificate. See hostRule and
+	// routerTLS/tlsDomain's comments.
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "dashboard-wildcard", Protocol: "http", Domain: strPtr("*.rv-tx.com"), EntryPoint: "websecure",
+			CertResolver: strPtr("letsencrypt"),
+			Targets:      []db.Target{{Address: "100.100.0.1", Port: 8080, Role: "primary"}},
+		},
+	})
+
+	r := cfg.HTTP.Routers["dashboard-wildcard"]
+	if r.TLS == nil || len(r.TLS.Domains) != 1 || r.TLS.Domains[0].Main != "*.rv-tx.com" {
+		t.Errorf("expected explicit tls.domains [{main: *.rv-tx.com}], got %+v", r.TLS)
+	}
+}
+
 func TestGenerate_TCPCatchAll(t *testing.T) {
 	cfg := Generate([]db.ResourceWithTargets{
 		{

@@ -5,6 +5,7 @@ package traefikconfig
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"rv-tx/internal/controlplane/db"
@@ -44,7 +45,21 @@ type router struct {
 // (static config, e.g. a staging vs. production Let's Encrypt
 // resolver) -- only meaningful on HTTP routers.
 type routerTLS struct {
-	CertResolver string `json:"certResolver,omitempty"`
+	CertResolver string      `json:"certResolver,omitempty"`
+	Domains      []tlsDomain `json:"domains,omitempty"`
+}
+
+// tlsDomain explicitly tells Traefik/lego which SAN to request a cert
+// for. Needed for a wildcard resource ("*.example.com"): Traefik's
+// automatic ACME domain detection only reads Host() rules, not
+// HostRegexp() (which is what a wildcard domain compiles to, see
+// hostRule) -- without this, a wildcard router's cert resolver would
+// never actually request a certificate at all (confirmed live: the
+// apex Host() router got its cert automatically, the HostRegexp()
+// wildcard router sat there with tls.certResolver set and never even
+// tried).
+type tlsDomain struct {
+	Main string `json:"main"`
 }
 
 type service struct {
@@ -108,11 +123,14 @@ func Generate(resources []db.ResourceWithTargets) Config {
 			}
 			rule := "PathPrefix(`/`)"
 			if r.Domain != nil && *r.Domain != "" {
-				rule = fmt.Sprintf("Host(`%s`)", *r.Domain)
+				rule = hostRule(*r.Domain)
 			}
 			var tls *routerTLS
 			if r.CertResolver != nil && *r.CertResolver != "" {
 				tls = &routerTLS{CertResolver: *r.CertResolver}
+				if r.Domain != nil && strings.HasPrefix(*r.Domain, "*.") {
+					tls.Domains = []tlsDomain{{Main: *r.Domain}}
+				}
 			}
 			cfg.HTTP.Routers[r.Name] = router{
 				Rule:        rule,
@@ -183,6 +201,22 @@ func Generate(resources []db.ResourceWithTargets) Config {
 	}
 
 	return cfg
+}
+
+// hostRule turns a resource's domain into a Traefik router rule.
+// Traefik's Host() matcher does exact-match only -- no wildcard syntax
+// -- so a domain given as "*.example.com" is translated into a
+// HostRegexp() matching any single label under that suffix instead.
+// This is what lets one resource (e.g. the dashboard itself at
+// rv-tx.com) also answer for every subdomain without a separate
+// resource per hostname; a plain domain still gets the exact-match
+// Host() rule as before.
+func hostRule(domain string) string {
+	if suffix, ok := strings.CutPrefix(domain, "*."); ok {
+		escaped := strings.ReplaceAll(suffix, ".", `\.`)
+		return fmt.Sprintf("HostRegexp(`^[^.]+\\.%s$`)", escaped)
+	}
+	return fmt.Sprintf("Host(`%s`)", domain)
 }
 
 // selectMasterBackupTarget implements the simple master/backup priority

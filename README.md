@@ -10,6 +10,17 @@ A custom HA Traefik-based reverse-proxy/tunnel control plane, replacing Pangolin
 
 Resources can target either a mesh node (`node_name`) or a raw external `ip:port` that never joins the mesh (`address`) — the latter is how the rv-tx.com DNS relay (below) reaches BIND9 without those boxes needing to join the mesh at all.
 
+- `dashboard/` — a React+Vite SPA, embedded into the control plane binary via `embed.FS` (`dashboard/embed.go`) and served at `/`. Everything under `/api/*` requires a session cookie (single shared bcrypt-hashed password, `RVTX_DASHBOARD_PASSWORD_HASH`/`RVTX_SESSION_SECRET`); `/ws/agent`, `/healthz`, and `/traefik/config` stay unauthenticated by design (agents and Traefik itself can't send credentials). `dashboard/dist/` is gitignored (build output) but must exist before `go build ./cmd/controlplane` will produce a real dashboard — run `npm --prefix dashboard ci && npm --prefix dashboard run build` first on a fresh clone.
+
+### Multiple DNS names for one resource — what Traefik can and can't do
+
+Traefik's own automatic ACME domain detection only reads a router's `Host()` rule — it can't request a cert for anything a `Host()` rule doesn't literally spell out, so out of the box one resource means one exact hostname. Two things this project adds on top of that, both in `internal/controlplane/traefikconfig`:
+
+- **Wildcard domains** (`domain: "*.rv-tx.com"`): `hostRule()` compiles a leading `*.` into a `HostRegexp()` rule (`^[^.]+\.rv-tx\.com$`) instead of `Host()`, so one resource answers for any subdomain. Traefik still can't auto-derive an ACME SAN from a regex rule though (confirmed live, 2026-08-17: the equivalent `Host()` resource got its cert automatically, the `HostRegexp()` one just sat there with `tls.certResolver` set and never requested anything) — so a wildcard resource's router also gets an explicit `tls.domains: [{main: "*.rv-tx.com"}]`, which is what actually triggers the DNS-01 request for that SAN.
+- **A DNS nameserver, specifically**: the dashboard's "Add DNS nameserver" wizard bundles the TCP+UDP port-53 external-target pattern (the same shape `ns1.rv-tx.com` uses) into one form. This is Traefik-side relay wiring only — the registrar side (adding a nameserver at Epik, glue records, the 2-nameserver minimum) is entirely outside Traefik's domain and still has to be done by hand.
+
+What Traefik has no concept of at all: one resource serving multiple *unrelated* hostnames with different backends (e.g. `a.example.com` and `b.other-domain.com` on one router) — that's just two separate resources, which is already exactly how this project's data model works (one `domain` per resource).
+
 ## Current deployment
 
 - Control plane + one agent (`node-a-pg`): `pangolin-pg` VM, `192.168.1.108`, systemd services `rvtx-controlplane.service` / `rvtx-agent.service`, Postgres database `rvtx`.
@@ -17,6 +28,7 @@ Resources can target either a mesh node (`node_name`) or a raw external `ip:port
 - DNS relay: Traefik container `rvtx-dns-relay` on `builder` (`--network host`, `--restart unless-stopped`), config at `/opt/rvtx/traefik/traefik.yml`, entrypoints `dns-tcp`/`dns-udp` on real port 53. Relays `rv-tx.com` DNS traffic to the internal BIND9 cluster (dns31/32/33, in the separate `dnsmasq-ui` project) via external-target TCP/UDP resources pointed at its dedicated public-view IPs (`192.168.7.242` primary / `192.168.7.243` backup).
 - `rv-tx.com`'s real, delegated nameservers: `ns1.rv-tx.com` (`builder`'s relay above, WAN IP has already changed once — see the operational note below, always verify current value rather than trusting this doc) and `ns2.rv-tx.com` (`165.23.32.238`, `dns03` directly — a real second public IP, not relayed through anything). Epik requires a minimum of two nameservers for a custom delegation, which is why there are two independent paths rather than one relay plus a backup.
 - ACME: Traefik's static config on `builder` (`/opt/rvtx/traefik/traefik.yml`) has two `certificatesResolvers` (`letsencrypt-staging`, `letsencrypt`), both using the native `rfc2136` DNS-01 provider against the `rvtx-acme` TSIG key on dns01. An HTTP resource opts in via `cert_resolver: "letsencrypt-staging"` (or `"letsencrypt"`) in its `POST /resources` body.
+- The dashboard itself is `rv-tx.com` and `*.rv-tx.com` — two HTTP resources (`rv-tx-com`, `rv-tx-com-wildcard`) targeting `node-a-pg:8080` (the control plane's own listen port) with `cert_resolver: "letsencrypt"` (production). Both real production certs issued live, 2026-08-17. The apex/wildcard A records (`165.23.33.26`, builder's WAN IP) are `dynamic_hosts`-tracked in dnsmasq-ui, same mechanism as `ns1.rv-tx.com`.
 
 ## Milestones
 
@@ -26,6 +38,7 @@ Resources can target either a mesh node (`node_name`) or a raw external `ip:port
 4. Multi-backend resources — HTTP sticky sessions + healthCheck failover, TCP/UDP master/backup
 5. Self-hosted DNS-01 for `rv-tx.com` on the internal BIND9 cluster — done, `rv-tx.com` is genuinely delegated (confirmed at the authoritative `.com` registry, not just cached resolvers) to `ns1.rv-tx.com`/`ns2.rv-tx.com` (see dnsmasq-ui project's own memory/commits for the BIND9-side half of this work)
 6. ACME DNS-01 automation via Traefik's native `rfc2136` provider — done, a real Let's Encrypt staging certificate has been obtained end-to-end through the real delegated zone (see the operational notes below for two real bugs found along the way)
+7. Dashboard (React SPA, embedded + auth) + wildcard-domain support — done, `rv-tx.com`/`*.rv-tx.com` both serve the dashboard over real production HTTPS
 
 ## Known gaps
 
@@ -103,6 +116,18 @@ Traefik's `dnsChallenge.resolvers` initially pointed at `1.1.1.1`/`8.8.8.8` (com
 
 Confirmed directly against lego's source (bundled with Traefik 3.6.25) rather than assumed from older docs/examples: `DNSUPDATE_NAMESERVER`, `DNSUPDATE_TSIG_KEY`, `DNSUPDATE_TSIG_SECRET`, `DNSUPDATE_TSIG_ALGORITHM`. The provider name in `dnsChallenge.provider` is still `rfc2136` — only the env var prefix changed.
 
+### systemd `Environment=` expands `$` in values — use `EnvironmentFile=` for secrets like bcrypt hashes
+
+`Environment=RVTX_DASHBOARD_PASSWORD_HASH='$2a$10$...'` silently corrupted the value on service start — systemd's `Environment=` directive supports `$VARNAME`/`${VARNAME}` expansion referencing other environment variables, and a bcrypt hash's `$2a$10$...` structure looks exactly like that syntax to its parser, so `$2a`/`$10` got expanded to empty (undefined vars) instead of staying literal. The single quotes around the value did nothing to prevent this — that's shell quoting, and systemd's unit-file parser isn't a shell. Fixed by moving both the password hash and session secret to a separate `EnvironmentFile=/opt/rvtx/rvtx-controlplane.env` (`chmod 600`) instead — that directive loads `KEY=value` lines literally, with no `$`-expansion at all. Any future secret containing `$` (bcrypt/argon2 hashes, some base64 alphabets) needs `EnvironmentFile=`, not inline `Environment=`.
+
+### SSH also mangles `$` in values passed as command-line arguments
+
+A related trap while deploying the above: `ssh host bash -s -- "$HASH" "$SECRET" <<'EOF'` looked safe (the heredoc is quoted, so no *local* re-expansion) but still corrupted the hash, because OpenSSH's client joins all trailing arguments into a single string and sends that to the *remote* shell to parse before `bash -s` ever runs — so `$2a$10$...` gets `$`-expanded a second time, remotely, regardless of local quoting. There's no clean way to pass a `$`-containing secret as an SSH command-line argument. Fixed by writing the value to a local file and `scp`-ing it directly instead — no shell ever re-parses the content.
+
 ### dnsmasq drift can silently break BIND9's TCP:53 (AXFR) fleet-wide
 
 Separate incident, same session, on the BIND9 side (dns31/32/33, `dnsmasq-ui` project): `dnsmasq` is deliberately left enabled at boot (not disabled) for historical reasons, but if it ever starts running again (e.g. after a reboot), it grabs the wildcard `0.0.0.0:53` bind and `named` ends up with **zero TCP listeners at all** — UDP mostly still works (kernel prefers the more-specific bind), but every AXFR (TCP-only) gets silently refused by dnsmasq itself, with zero trace in BIND's own logs. Check `ss -tlnp | grep dnsmasq` on any of the three DNS nodes if AXFR/TCP:53 issues show up again; `systemctl stop dnsmasq && systemctl restart named` is the fix (`named` needs an explicit restart to actually claim the freed TCP socket — stopping dnsmasq alone isn't enough).
+
+### Editing a long-running app's config file out-of-band races its own background writes
+
+Adding `rv-tx.com`/`*.rv-tx.com` A records to dnsmasq-ui's `zones.json` via a standalone script (bypassing its running Flask process) worked on disk, but the already-running `dnsmasq-ui.service` on dns01 still held the *old* config in memory — and its background `dynamic_hosts` poller called its own `save_config()`/deploy cycle shortly after, using that stale in-memory state, and silently clobbered the just-deployed zone file back to the old content. Confirmed by re-running the same deploy script a second time (no service restart needed) and diffing the zone file immediately after — the records were there that time. **General lesson**: editing a long-running service's config file directly from outside the process is only safe if the process is stopped first, or if you accept a race with whatever that process does on its own schedule (a poller, a periodic re-deploy, a webhook) — a bare file write can look like it worked and then get overwritten seconds later with no error anywhere.

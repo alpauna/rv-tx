@@ -1,0 +1,53 @@
+import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
+import { AuthProvider, useAuth } from './AuthContext';
+import Login from './pages/Login';
+import Nodes from './pages/Nodes';
+import Resources from './pages/Resources';
+import ConfigPreview from './pages/ConfigPreview';
+
+function Layout({ children }) {
+  const { logout } = useAuth();
+  return (
+    <>
+      <header style={{ borderBottom: '1px solid var(--border)', padding: '0.75rem 1.5rem', display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
+        <strong>rv-tx</strong>
+        <nav style={{ display: 'flex', gap: '1rem', flex: 1 }}>
+          <NavLink to="/" end>Nodes</NavLink>
+          <NavLink to="/resources">Resources</NavLink>
+          <NavLink to="/config">Traefik config</NavLink>
+        </nav>
+        <button className="secondary" onClick={logout}>Log out</button>
+      </header>
+      <main style={{ padding: '1.5rem', flex: 1 }}>{children}</main>
+    </>
+  );
+}
+
+function Protected({ children }) {
+  const { authed } = useAuth();
+  if (authed === null) return null; // still checking the session
+  if (!authed) return <Navigate to="/login" replace />;
+  return <Layout>{children}</Layout>;
+}
+
+function AppRoutes() {
+  const { authed } = useAuth();
+  return (
+    <Routes>
+      <Route path="/login" element={authed ? <Navigate to="/" replace /> : <Login />} />
+      <Route path="/" element={<Protected><Nodes /></Protected>} />
+      <Route path="/resources" element={<Protected><Resources /></Protected>} />
+      <Route path="/config" element={<Protected><ConfigPreview /></Protected>} />
+    </Routes>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
+    </BrowserRouter>
+  );
+}

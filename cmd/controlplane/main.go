@@ -1,15 +1,20 @@
 // Command controlplane runs the rv-tx control plane: Postgres-backed
-// mesh coordination over WebSocket. Config entirely from env vars,
-// matching the .env convention already used elsewhere in this project.
+// mesh coordination over WebSocket, Traefik dynamic config generation,
+// and a dashboard (API + embedded SPA) for managing resources. Config
+// entirely from env vars, matching the .env convention already used
+// elsewhere in this project.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 
+	"rv-tx/dashboard"
+	"rv-tx/internal/controlplane/auth"
 	"rv-tx/internal/controlplane/db"
 	"rv-tx/internal/controlplane/traefikconfig"
 	"rv-tx/internal/controlplane/wsserver"
@@ -20,6 +25,8 @@ func main() {
 	meshCIDR := requireEnv("RVTX_MESH_CIDR")
 	listenAddr := envOr("RVTX_LISTEN_ADDR", ":8080")
 	migrationsDir := envOr("RVTX_MIGRATIONS_DIR", "migrations")
+	passwordHash := requireEnv("RVTX_DASHBOARD_PASSWORD_HASH")
+	sessionSecret := requireEnv("RVTX_SESSION_SECRET")
 
 	ctx := context.Background()
 
@@ -37,13 +44,29 @@ func main() {
 	srv := wsserver.New(database, meshCIDR)
 
 	mux := http.NewServeMux()
+
+	// Agent/Traefik-facing -- deliberately unauthenticated, must keep
+	// working regardless of the dashboard's own auth below. Agents
+	// connect over WireGuard-adjacent trust already (mesh membership
+	// itself is the control), and Traefik's own HTTP provider has no
+	// mechanism to send credentials.
 	mux.HandleFunc("/ws/agent", srv.HandleWS)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/traefik/config", traefikConfigHandler(database))
-	mux.HandleFunc("/resources", createResourceHandler(database))
+
+	// Dashboard API -- authenticated except login itself.
+	mux.HandleFunc("POST /api/login", loginHandler(passwordHash, sessionSecret))
+	mux.HandleFunc("POST /api/logout", logoutHandler())
+	mux.Handle("GET /api/nodes", requireAuth(sessionSecret, listNodesHandler(database)))
+	mux.Handle("GET /api/resources", requireAuth(sessionSecret, listResourcesHandler(database)))
+	mux.Handle("POST /api/resources", requireAuth(sessionSecret, createResourceHandler(database)))
+	mux.Handle("DELETE /api/resources/{name}", requireAuth(sessionSecret, deleteResourceHandler(database)))
+
+	// The dashboard SPA itself -- everything not matched above.
+	mux.Handle("/", spaHandler())
 
 	log.Printf("control plane listening on %s (mesh cidr %s)", listenAddr, meshCIDR)
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
@@ -51,9 +74,51 @@ func main() {
 	}
 }
 
+// requireAuth wraps a handler so it 401s without a valid session
+// cookie -- used for every /api/* route except POST /api/login.
+func requireAuth(sessionSecret string, next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !auth.ValidSession(r, sessionSecret) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	})
+}
+
+type loginRequest struct {
+	Password string `json:"password"`
+}
+
+func loginHandler(passwordHash, sessionSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req loginRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if !auth.VerifyPassword(passwordHash, req.Password) {
+			http.Error(w, "invalid password", http.StatusUnauthorized)
+			return
+		}
+		http.SetCookie(w, auth.NewSessionCookie(sessionSecret))
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func logoutHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, auth.ExpiredCookie())
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 // traefikConfigHandler serves Traefik's dynamic config JSON -- this is
 // what Traefik's `http` provider polls (traefik.yml:
-// `providers.http.endpoint`).
+// `providers.http.endpoint`), and what the dashboard's config-preview
+// page fetches directly (no separate authenticated endpoint needed --
+// this one is already meant to be machine-readable within the LAN
+// trust model).
 func traefikConfigHandler(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		resources, err := database.ListResourcesWithTargets(r.Context())
@@ -70,13 +135,40 @@ func traefikConfigHandler(database *db.DB) http.HandlerFunc {
 	}
 }
 
-// createResourceRequest is the POST /resources body. No auth/dashboard
-// yet for this milestone -- deliberately minimal, matching milestone
-// 1's own no-auth scope for the same reason (a real auth layer is
-// separate future work, not blocking mesh/Traefik-config proof).
-// Targets is a list rather than a single target: http resources can
-// have any number (a load-balanced pool), tcp resources at most a
-// primary and a backup (validated in db.CreateResource).
+func listNodesHandler(database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		nodes, err := database.ListNodes(r.Context())
+		if err != nil {
+			log.Printf("list nodes: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(nodes); err != nil {
+			log.Printf("encode nodes: %v", err)
+		}
+	}
+}
+
+func listResourcesHandler(database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resources, err := database.ListResourcesWithTargets(r.Context())
+		if err != nil {
+			log.Printf("list resources: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resources); err != nil {
+			log.Printf("encode resources: %v", err)
+		}
+	}
+}
+
+// createResourceRequest is the POST /api/resources body. Targets is a
+// list rather than a single target: http resources can have any
+// number (a load-balanced pool), tcp/udp resources at most a primary
+// and a backup (validated in db.CreateResource).
 type createResourceRequest struct {
 	Name         string           `json:"name"`
 	Protocol     string           `json:"protocol"`
@@ -99,11 +191,6 @@ type targetSpecJSON struct {
 
 func createResourceHandler(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
 		var req createResourceRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json body: "+err.Error(), http.StatusBadRequest)
@@ -133,6 +220,45 @@ func createResourceHandler(database *db.DB) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusCreated)
 	}
+}
+
+func deleteResourceHandler(database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if err := database.DeleteResource(r.Context(), name); err != nil {
+			log.Printf("delete resource %q: %v", name, err)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// spaHandler serves the embedded, built dashboard (dashboard/dist).
+// Real files (JS/CSS/asset requests) are served as-is; anything else
+// falls back to index.html so client-side routing works on a direct
+// URL load or a page refresh.
+func spaHandler() http.Handler {
+	sub, err := fs.Sub(dashboard.DistFS, "dist")
+	if err != nil {
+		log.Fatalf("dashboard embed: %v", err)
+	}
+	fileServer := http.FileServer(http.FS(sub))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == "/" {
+			path = "/index.html"
+		}
+		if _, err := fs.Stat(sub, path[1:]); err != nil {
+			r2 := new(http.Request)
+			*r2 = *r
+			r2.URL.Path = "/index.html"
+			fileServer.ServeHTTP(w, r2)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func requireEnv(key string) string {

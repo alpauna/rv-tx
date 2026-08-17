@@ -26,22 +26,22 @@ type TargetSpec struct {
 // with no rv-tx mesh node at all -- LastSeen is always nil for those,
 // since there's no heartbeat to key off.
 type Target struct {
-	Address  string
-	Port     int
-	Role     string
-	External bool
-	LastSeen *time.Time
+	Address  string     `json:"address"`
+	Port     int        `json:"port"`
+	Role     string     `json:"role"`
+	External bool       `json:"external"`
+	LastSeen *time.Time `json:"last_seen"`
 }
 
 // ResourceWithTargets is a resource joined with all of its backend
 // targets.
 type ResourceWithTargets struct {
-	Name         string
-	Protocol     string
-	Domain       *string
-	EntryPoint   string
-	CertResolver *string
-	Targets      []Target
+	Name         string   `json:"name"`
+	Protocol     string   `json:"protocol"`
+	Domain       *string  `json:"domain"`
+	EntryPoint   string   `json:"entry_point"`
+	CertResolver *string  `json:"cert_resolver"`
+	Targets      []Target `json:"targets"`
 }
 
 // CreateResource validates the target list for the given protocol,
@@ -107,6 +107,20 @@ func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain 
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit create resource: %w", err)
+	}
+	return nil
+}
+
+// DeleteResource removes a resource by name. resource_targets rows
+// cascade via the existing ON DELETE CASCADE foreign key -- no
+// separate cleanup needed.
+func (db *DB) DeleteResource(ctx context.Context, name string) error {
+	tag, err := db.Pool.Exec(ctx, `DELETE FROM resources WHERE name = $1`, name)
+	if err != nil {
+		return fmt.Errorf("delete resource %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("resource %q not found", name)
 	}
 	return nil
 }

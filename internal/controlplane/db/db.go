@@ -33,12 +33,12 @@ func (db *DB) Close() {
 
 // Node mirrors the nodes table.
 type Node struct {
-	ID           string
-	Name         string
-	PublicKey    string
-	MeshIP       string
-	LastEndpoint *string
-	LastSeen     *time.Time
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	PublicKey    string     `json:"public_key"`
+	MeshIP       string     `json:"mesh_ip"`
+	LastEndpoint *string    `json:"last_endpoint"`
+	LastSeen     *time.Time `json:"last_seen"`
 }
 
 // UsedMeshIPs returns every mesh_ip currently allocated, for the mesh
