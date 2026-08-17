@@ -15,7 +15,8 @@ Resources can target either a mesh node (`node_name`) or a raw external `ip:port
 - Control plane + one agent (`node-a-pg`): `pangolin-pg` VM, `192.168.1.108`, systemd services `rvtx-controlplane.service` / `rvtx-agent.service`, Postgres database `rvtx`.
 - Second agent (`node-b-builder`): `builder`, `165.23.32.123`, systemd service `rvtx-agent.service`.
 - DNS relay: Traefik container `rvtx-dns-relay` on `builder` (`--network host`, `--restart unless-stopped`), config at `/opt/rvtx/traefik/traefik.yml`, entrypoints `dns-tcp`/`dns-udp` on real port 53. Relays `rv-tx.com` DNS traffic to the internal BIND9 cluster (dns31/32/33, in the separate `dnsmasq-ui` project) via external-target TCP/UDP resources pointed at its dedicated public-view IPs (`192.168.7.242` primary / `192.168.7.243` backup).
-- `rv-tx.com`'s real, delegated nameservers: `ns1.rv-tx.com` (`165.23.32.123`, `builder`'s relay above) and `ns2.rv-tx.com` (`165.23.32.238`, `dns03` directly — a real second public IP, not relayed through anything). Epik requires a minimum of two nameservers for a custom delegation, which is why there are two independent paths rather than one relay plus a backup.
+- `rv-tx.com`'s real, delegated nameservers: `ns1.rv-tx.com` (`builder`'s relay above, WAN IP has already changed once — see the operational note below, always verify current value rather than trusting this doc) and `ns2.rv-tx.com` (`165.23.32.238`, `dns03` directly — a real second public IP, not relayed through anything). Epik requires a minimum of two nameservers for a custom delegation, which is why there are two independent paths rather than one relay plus a backup.
+- ACME: Traefik's static config on `builder` (`/opt/rvtx/traefik/traefik.yml`) has two `certificatesResolvers` (`letsencrypt-staging`, `letsencrypt`), both using the native `rfc2136` DNS-01 provider against the `rvtx-acme` TSIG key on dns01. An HTTP resource opts in via `cert_resolver: "letsencrypt-staging"` (or `"letsencrypt"`) in its `POST /resources` body.
 
 ## Milestones
 
@@ -24,7 +25,7 @@ Resources can target either a mesh node (`node_name`) or a raw external `ip:port
 3. Endpoint auto-discovery (control plane infers endpoint from connection source + agent-reported port, with a manual override escape hatch)
 4. Multi-backend resources — HTTP sticky sessions + healthCheck failover, TCP/UDP master/backup
 5. Self-hosted DNS-01 for `rv-tx.com` on the internal BIND9 cluster — done, `rv-tx.com` is genuinely delegated (confirmed at the authoritative `.com` registry, not just cached resolvers) to `ns1.rv-tx.com`/`ns2.rv-tx.com` (see dnsmasq-ui project's own memory/commits for the BIND9-side half of this work)
-6. ACME DNS-01 automation via Traefik's native `rfc2136` provider (in progress)
+6. ACME DNS-01 automation via Traefik's native `rfc2136` provider — done, a real Let's Encrypt staging certificate has been obtained end-to-end through the real delegated zone (see the operational notes below for two real bugs found along the way)
 
 ## Known gaps
 
@@ -83,6 +84,24 @@ Full incident writeup: `netmonitor_builder_asymmetric_routing` memory (netmonito
 ### `dns03` needed the same routing fix as `builder`, applied proactively this time
 
 Once `dns03` got a real WAN interface for `ns2.rv-tx.com` (above), it became dual-homed the exact same way `builder` was — and would have hit the identical equal-metric default-route bug. Fixed proactively, before any live symptom, with the same pattern: `/etc/netplan/92-eth1-default-priority.yaml` giving `eth1` metric 50 and `eth0` metric 200. `dns03` didn't need `builder`'s extra specific-route fix (no `192.168.7.0/24`-style subnet it only reached by accident) — it's already directly on that subnet via `eth0.7`. Also needed a `systemctl restart named` to bind the new WAN IP's TCP:53 socket (UDP came up automatically) — same pattern as `builder`.
+
+### `builder`'s WAN IP changed mid-session (ISP-side) and exposed a real DNS-tracking gap
+
+`builder`'s public IP changed from `165.23.32.123` to `165.23.33.26` (an ISP-side event, not something either of us did — same root event as the earlier packet-loss/outage). This broke `ns1.rv-tx.com`'s DNS records because of a real gap: the **A** record had only ever been set once (never tracked dynamically, unlike the AAAA), and the AAAA tracking entry's `target_host` (used for SSH reachability) was set to the WAN IP itself — so the exact moment the WAN IP changed, the poller could no longer even reach the host to ask about it. Both broke simultaneously.
+
+**Fixed properly** (dnsmasq-ui side): added real `dynamic_hosts` A-record tracking for both `ns1`/`ns2` (previously only AAAA was tracked), and repointed both AAAA entries' `target_host` to each host's stable LAN IP (`192.168.0.27`/`192.168.0.233`) instead of its own WAN address. This decouples "how do I reach this host to ask a question" from "what WAN value am I asking about" — a future WAN IP change can't break its own detection mechanism again. Epik's glue A record for `ns1.rv-tx.com` still isn't automated (same known gap noted above) and needs manual updating whenever this happens again.
+
+### DNS-01 update-policy: use `zonesub`, not `subdomain`, for multi-host certs
+
+Phase 3's original update-policy (`grant rvtx-acme subdomain _acme-challenge.rv-tx.com. TXT;`) looked right but wasn't: `subdomain` only grants the exact name and *its own* subdomains, which is a completely different DNS-tree branch from `_acme-challenge.<hostname>.rv-tx.com` (a subdomain of `<hostname>.rv-tx.com`, not of `_acme-challenge.rv-tx.com`). Every real per-host challenge was REFUSED until this was changed to `grant rvtx-acme zonesub TXT;` (any name in the zone, TXT-only) on dns01 — correctly covers every hostname depth in one policy. If a future self-hosted zone needs "cert for any hostname under this domain," use `zonesub <type>`, not `subdomain <fixed-name>`.
+
+### Don't trust public resolvers for DNS-01 propagation checks on a freshly-delegated zone
+
+Traefik's `dnsChallenge.resolvers` initially pointed at `1.1.1.1`/`8.8.8.8` (common in examples) for propagation checking. Confirmed live via an isolated test (manually `nsupdate`-inserted a TXT record, then polled `1.1.1.1` in a tight loop for 60s) that Cloudflare's anycast network gave genuinely inconsistent `NXDOMAIN`/`NOERROR` answers depending on which physical node answered — likely stale negative caching on some nodes from before the zone existed. The record was correct and live on our own authoritative servers the entire time; only the public-resolver check was unreliable. Fixed by pointing `resolvers` at `rv-tx.com`'s own nameservers directly — always current, and it's what Let's Encrypt's real validators query anyway (the real delegation chain, not a public resolver's cache).
+
+### lego's rfc2136 env var prefix is `DNSUPDATE_`, not `RFC2136_`
+
+Confirmed directly against lego's source (bundled with Traefik 3.6.25) rather than assumed from older docs/examples: `DNSUPDATE_NAMESERVER`, `DNSUPDATE_TSIG_KEY`, `DNSUPDATE_TSIG_SECRET`, `DNSUPDATE_TSIG_ALGORITHM`. The provider name in `dnsChallenge.provider` is still `rfc2136` — only the env var prefix changed.
 
 ### dnsmasq drift can silently break BIND9's TCP:53 (AXFR) fleet-wide
 
