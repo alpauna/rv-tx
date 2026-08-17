@@ -3,62 +3,173 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
-// ResourceWithNode is a resource joined with its target node's current
-// mesh_ip -- generated Traefik config always needs the live address, not
-// a value that could go stale if the node ever re-registers.
-type ResourceWithNode struct {
-	Name         string
-	Protocol     string
-	Domain       *string
-	TargetMeshIP string
-	TargetPort   int
-	EntryPoint   string
+// TargetSpec is one requested backend target for a resource being
+// created -- NodeName is resolved to a node id inside CreateResource.
+type TargetSpec struct {
+	NodeName string
+	Port     int
+	Role     string // "primary" or "backup"; "" defaults to "primary"
 }
 
-// CreateResource looks up targetNodeName to get its node id, then
-// inserts the resource. Returns a descriptive error if the named node
-// doesn't exist rather than a raw FK-violation from Postgres.
-func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, targetNodeName string, targetPort int, entryPoint string) error {
-	var targetNodeID string
-	err := db.Pool.QueryRow(ctx,
-		`SELECT id::text FROM nodes WHERE name = $1`, targetNodeName,
-	).Scan(&targetNodeID)
-	if err != nil {
-		return fmt.Errorf("target node %q not found: %w", targetNodeName, err)
+// Target is one resource's backend as returned for Traefik config
+// generation -- carries the target node's live mesh_ip and last_seen
+// (for tcp primary/backup liveness selection) rather than a value that
+// could go stale if the node ever re-registers.
+type Target struct {
+	MeshIP   string
+	Port     int
+	Role     string
+	LastSeen *time.Time
+}
+
+// ResourceWithTargets is a resource joined with all of its backend
+// targets.
+type ResourceWithTargets struct {
+	Name       string
+	Protocol   string
+	Domain     *string
+	EntryPoint string
+	Targets    []Target
+}
+
+// CreateResource validates the target list for the given protocol,
+// looks up each target's node by name, then inserts the resource and
+// its targets in a single transaction. Validation is deliberately done
+// in Go rather than DB constraints, matching this project's existing
+// style (see UpsertNode's comments) -- http resources are an
+// unbounded pool (any number of targets, role ignored), tcp resources
+// are at most a primary and a backup (not full load balancing yet).
+func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, entryPoint string, targets []TargetSpec) error {
+	if err := validateTargets(protocol, targets); err != nil {
+		return err
 	}
 
-	_, err = db.Pool.Exec(ctx, `
-		INSERT INTO resources (name, protocol, domain, target_node_id, target_port, entry_point)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, name, protocol, domain, targetNodeID, targetPort, entryPoint)
+	tx, err := db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin create resource: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var resourceID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO resources (name, protocol, domain, entry_point)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id::text
+	`, name, protocol, domain, entryPoint).Scan(&resourceID)
 	if err != nil {
 		return fmt.Errorf("insert resource: %w", err)
+	}
+
+	for _, t := range targets {
+		role := t.Role
+		if role == "" {
+			role = "primary"
+		}
+
+		var nodeID string
+		err := tx.QueryRow(ctx,
+			`SELECT id::text FROM nodes WHERE name = $1`, t.NodeName,
+		).Scan(&nodeID)
+		if err != nil {
+			return fmt.Errorf("target node %q not found: %w", t.NodeName, err)
+		}
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO resource_targets (resource_id, node_id, port, role)
+			VALUES ($1, $2, $3, $4)
+		`, resourceID, nodeID, t.Port, role); err != nil {
+			return fmt.Errorf("insert target %q: %w", t.NodeName, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit create resource: %w", err)
 	}
 	return nil
 }
 
-// ListResourcesWithNodes returns every resource joined with its target
-// node's current mesh_ip, for Traefik config generation.
-func (db *DB) ListResourcesWithNodes(ctx context.Context) ([]ResourceWithNode, error) {
+func validateTargets(protocol string, targets []TargetSpec) error {
+	if len(targets) == 0 {
+		return fmt.Errorf("at least one target is required")
+	}
+
+	switch protocol {
+	case "http":
+		return nil
+
+	case "tcp":
+		if len(targets) > 2 {
+			return fmt.Errorf("tcp resources support at most 2 targets (primary + backup), got %d", len(targets))
+		}
+		if len(targets) == 2 {
+			roles := map[string]bool{}
+			for _, t := range targets {
+				role := t.Role
+				if role == "" {
+					role = "primary"
+				}
+				roles[role] = true
+			}
+			if !roles["primary"] || !roles["backup"] {
+				return fmt.Errorf("tcp resources with 2 targets require exactly one \"primary\" and one \"backup\" role")
+			}
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unknown protocol %q", protocol)
+	}
+}
+
+// ListResourcesWithTargets returns every resource joined with all of
+// its backend targets' current mesh_ip/last_seen, for Traefik config
+// generation.
+func (db *DB) ListResourcesWithTargets(ctx context.Context) ([]ResourceWithTargets, error) {
 	rows, err := db.Pool.Query(ctx, `
-		SELECT r.name, r.protocol, r.domain, host(n.mesh_ip), r.target_port, r.entry_point
+		SELECT r.id::text, r.name, r.protocol, r.domain, r.entry_point,
+		       host(n.mesh_ip), rt.port, rt.role, n.last_seen
 		FROM resources r
-		JOIN nodes n ON n.id = r.target_node_id
+		JOIN resource_targets rt ON rt.resource_id = r.id
+		JOIN nodes n ON n.id = rt.node_id
+		ORDER BY r.name, rt.role
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list resources: %w", err)
 	}
 	defer rows.Close()
 
-	var out []ResourceWithNode
+	byID := make(map[string]*ResourceWithTargets)
+	var order []string
+
 	for rows.Next() {
-		var r ResourceWithNode
-		if err := rows.Scan(&r.Name, &r.Protocol, &r.Domain, &r.TargetMeshIP, &r.TargetPort, &r.EntryPoint); err != nil {
-			return nil, fmt.Errorf("scan resource: %w", err)
+		var (
+			id, name, protocol, entryPoint, meshIP, role string
+			domain                                       *string
+			port                                         int
+			lastSeen                                     *time.Time
+		)
+		if err := rows.Scan(&id, &name, &protocol, &domain, &entryPoint, &meshIP, &port, &role, &lastSeen); err != nil {
+			return nil, fmt.Errorf("scan resource target: %w", err)
 		}
-		out = append(out, r)
+
+		r, ok := byID[id]
+		if !ok {
+			r = &ResourceWithTargets{Name: name, Protocol: protocol, Domain: domain, EntryPoint: entryPoint}
+			byID[id] = r
+			order = append(order, id)
+		}
+		r.Targets = append(r.Targets, Target{MeshIP: meshIP, Port: port, Role: role, LastSeen: lastSeen})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]ResourceWithTargets, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out, nil
 }

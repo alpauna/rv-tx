@@ -56,7 +56,7 @@ func main() {
 // `providers.http.endpoint`).
 func traefikConfigHandler(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resources, err := database.ListResourcesWithNodes(r.Context())
+		resources, err := database.ListResourcesWithTargets(r.Context())
 		if err != nil {
 			log.Printf("list resources for traefik config: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -74,13 +74,21 @@ func traefikConfigHandler(database *db.DB) http.HandlerFunc {
 // yet for this milestone -- deliberately minimal, matching milestone
 // 1's own no-auth scope for the same reason (a real auth layer is
 // separate future work, not blocking mesh/Traefik-config proof).
+// Targets is a list rather than a single target: http resources can
+// have any number (a load-balanced pool), tcp resources at most a
+// primary and a backup (validated in db.CreateResource).
 type createResourceRequest struct {
-	Name           string `json:"name"`
-	Protocol       string `json:"protocol"`
-	Domain         string `json:"domain,omitempty"`
-	TargetNodeName string `json:"target_node_name"`
-	TargetPort     int    `json:"target_port"`
-	EntryPoint     string `json:"entry_point"`
+	Name       string           `json:"name"`
+	Protocol   string           `json:"protocol"`
+	Domain     string           `json:"domain,omitempty"`
+	EntryPoint string           `json:"entry_point"`
+	Targets    []targetSpecJSON `json:"targets"`
+}
+
+type targetSpecJSON struct {
+	NodeName string `json:"node_name"`
+	Port     int    `json:"port"`
+	Role     string `json:"role,omitempty"` // "primary" or "backup"; omit for http (ignored) or a single tcp target (defaults to "primary")
 }
 
 func createResourceHandler(database *db.DB) http.HandlerFunc {
@@ -101,8 +109,12 @@ func createResourceHandler(database *db.DB) http.HandlerFunc {
 			domain = &req.Domain
 		}
 
-		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain,
-			req.TargetNodeName, req.TargetPort, req.EntryPoint)
+		targets := make([]db.TargetSpec, len(req.Targets))
+		for i, t := range req.Targets {
+			targets[i] = db.TargetSpec{NodeName: t.NodeName, Port: t.Port, Role: t.Role}
+		}
+
+		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, targets)
 		if err != nil {
 			log.Printf("create resource %q: %v", req.Name, err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
