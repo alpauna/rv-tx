@@ -24,6 +24,20 @@ Resources can target either a mesh node (`node_name`) or a raw external `ip:port
 4. Multi-backend resources — HTTP sticky sessions + healthCheck failover, TCP/UDP master/backup
 5. Self-hosted DNS-01 for `rv-tx.com` on the internal BIND9 cluster (in progress — see dnsmasq-ui project's own memory/commits for the BIND9-side half of this work)
 
+## Known gaps
+
+### IPv6 is only half-done for the DNS relay
+
+`ns1.rv-tx.com` has a real, tracked AAAA record (`2001:48f8:20:0:d801:f956:c943:6d87`, builder's real public IPv6) — added via dnsmasq-ui's `dynamic_hosts` mechanism (a new poll-and-update entry, `connection: paramiko`, `interface: eth1`, `record_type: AAAA`, no `subnet`/SLAAC assumption, since this address is a dynamically-leased DHCPv6 `/128` that can change entirely on renewal, not a stable MAC-derived SLAAC suffix within a drifting prefix). It resolves correctly from anywhere.
+
+**But the relay itself is not reachable over IPv6 from outside builder's own network** — confirmed both TCP and UDP time out externally on `[2001:48f8:20:0:d801:f956:c943:6d87]:53`, while the exact same queries against builder's own local IPv6 (from builder itself) succeed immediately, and this sandbox's own IPv6 egress was separately confirmed working (a real external IPv6 resolver answered fine). So Traefik is genuinely listening and answering on IPv6 — the gap is external reachability, most likely a Proxmox firewall rule that's IPv4-scoped only (the TCP/UDP:53 rule added for the IPv4 relay didn't carry an IPv6 counterpart; Proxmox typically keeps IPv4/IPv6 firewall rules separate).
+
+**Deliberately left as a known gap for now** (user's explicit call, 2026-08-17), same as the Epik glue record below — IPv4 is fully proven end-to-end and that's what Phase 5's delegation actually depends on.
+
+### Epik's glue record for `ns1.rv-tx.com` is IPv4-only
+
+Epik's registrar-level glue/host record only has the A record (`165.23.32.123`), not an AAAA — Epik's DNS-record API (the one `lego`'s built-in Epik provider would use) is a separate thing from registrar-level nameserver/glue management, which currently has to be done by hand through Epik's dashboard. Automating this (or finding a better way to keep it in sync with builder's dynamic IPv6) is future work, not scoped yet — "add a layer to Epik, or handle better later," per the user's own framing when this was raised.
+
 ## Operational notes / known gotchas
 
 ### `builder` needed a routing fix for the DNS relay's UDP replies to work (2026-08-17)
