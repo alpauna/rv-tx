@@ -42,14 +42,6 @@ What Traefik has no concept of at all: one resource serving multiple *unrelated*
 
 ## Known gaps
 
-### IPv6 is only half-done for the DNS relay
-
-`ns1.rv-tx.com` has a real, tracked AAAA record (`2001:48f8:20:0:d801:f956:c943:6d87`, builder's real public IPv6) — added via dnsmasq-ui's `dynamic_hosts` mechanism (a new poll-and-update entry, `connection: paramiko`, `interface: eth1`, `record_type: AAAA`, no `subnet`/SLAAC assumption, since this address is a dynamically-leased DHCPv6 `/128` that can change entirely on renewal, not a stable MAC-derived SLAAC suffix within a drifting prefix). It resolves correctly from anywhere.
-
-**But the relay itself is not reachable over IPv6 from outside builder's own network** — confirmed both TCP and UDP time out externally on `[2001:48f8:20:0:d801:f956:c943:6d87]:53`, while the exact same queries against builder's own local IPv6 (from builder itself) succeed immediately, and this sandbox's own IPv6 egress was separately confirmed working (a real external IPv6 resolver answered fine). So Traefik is genuinely listening and answering on IPv6 — the gap is external reachability, most likely a Proxmox firewall rule that's IPv4-scoped only (the TCP/UDP:53 rule added for the IPv4 relay didn't carry an IPv6 counterpart; Proxmox typically keeps IPv4/IPv6 firewall rules separate).
-
-**Deliberately left as a known gap for now** (user's explicit call, 2026-08-17), same as the Epik glue record below — IPv4 is fully proven end-to-end and that's what Phase 5's delegation actually depends on.
-
 ### Epik's glue records are IPv4-only
 
 Epik's registrar-level glue/host records for both `ns1.rv-tx.com` and `ns2.rv-tx.com` only have A records (`165.23.32.123`/`165.23.32.238`), no AAAA — Epik's DNS-record API (the one `lego`'s built-in Epik provider would use) is a separate thing from registrar-level nameserver/glue management, which currently has to be done by hand through Epik's dashboard. Both nodes' real public IPv6 addresses are already tracked correctly in the zone's own content (see the `dynamic_hosts` entries below) — it's specifically the registrar-level glue that's IPv4-only. Automating this (or finding a better way to keep it in sync with dynamic IPv6) is future work, not scoped yet — "add a layer to Epik, or handle better later," per the user's own framing when this was raised.
@@ -93,6 +85,23 @@ Two parts, both required:
 **If you add a new subnet `builder` needs to reach** that isn't `192.168.0.0/23` or reachable via the WAN default, don't assume it works just because a similar one does — check `ip route show` for a specific route first, or add one to this same file.
 
 Full incident writeup: `netmonitor_builder_asymmetric_routing` memory (netmonitor project). This is also the most likely real explanation for a previously-unresolved, separate bug (`netmonitor_wireguard_wan_bug`) on this same host — not yet retested against this fix.
+
+### `builder` had the same *class* of bug for IPv6 too — but a different, worse mechanism (2026-08-17)
+
+This was originally logged in "Known gaps" as "IPv6 is only half-done for the DNS relay," with a guessed cause ("most likely a Proxmox firewall rule that's IPv4-scoped only"). **That guess was wrong.** The real cause: `eth0` (meant to be a pure internal LAN interface — `dhcp6: true` in netplan's cloud-init defaults, never intentionally given a public role) was receiving real IPv6 Router Advertisements for the *same* `2001:48f8:20:0::/64` WAN prefix `eth1` uses, almost certainly RA leaking across the physical trunk from VLAN 999 onto VLAN 0/native — a switch/trunk-level detail invisible from either VM's own config. `eth0` picked up a real global address in that prefix via SLAAC, which made the kernel treat *any* destination sharing that `/64` — including every real external IPv6 client — as on-link and directly reachable via `eth0`. So every reply (a DNS answer, a TLS SYN-ACK) got routed out the LAN interface instead of back out `eth1` where the request actually arrived, and silently vanished. Confirmed live via `tcpdump` on both interfaces simultaneously during a real external client's connection attempt: the SYN arrived cleanly on `eth1`, but the SYN-ACK went out `eth0` instead (`ip -6 route get <client-address>` resolved via `eth0` with an `eth0`-scoped source address) — and `eth0` even had a *completed* Neighbor Discovery entry for the external client's address, meaning something on that LAN segment was answering ND for it, then the actual reply still went nowhere.
+
+Same underlying bug *category* as the IPv4/UDP fix above (asymmetric routing silently breaking replies to external clients on a dual-homed host) but a different, more surprising mechanism — not an equal-metric tie this time, an actively wrong on-link determination caused by an interface acquiring an address it should never have had. Worth remembering as a recurring risk shape for any future dual-homed host in this project, IPv4 or IPv6: don't assume "it has an address so it must be intentional" — check *why* an interface has a given address before trusting routing decisions built on it.
+
+**Fix**, `/etc/netplan/93-eth0-no-ipv6-autoconf.yaml`:
+```yaml
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp6: false
+      accept-ra: false
+```
+`eth0` doesn't need any IPv6 address at all — this project's internal LAN routing is entirely IPv4. Removing its ability to acquire one removes the on-link ambiguity completely, without touching `eth1` or any switch/VLAN config. Verified live, both directions, from a real external client: HTTPS to `rv-tx.com`/`*.rv-tx.com` over IPv6 works end-to-end, and the DNS relay (`dig -6 @2001:48f8:20:0:7579:c7bf:94b7:7293 rv-tx.com SOA`) answers correctly too — this one fix covers every public-facing service on `builder`, not just the port being tested at the time, since the root cause was routing-table-wide.
 
 ### `dns03` needed the same routing fix as `builder`, applied proactively this time
 
