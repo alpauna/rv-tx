@@ -1,0 +1,33 @@
+# Multi-stage build: dashboard (Node/Vite) -> Go binary -> minimal
+# runtime. The dashboard MUST be built before `go build`, since
+# dashboard/embed.go's //go:embed directive needs dashboard/dist/ to
+# exist at build time -- see README.md's "Accounts, roles, and email"
+# section / dashboard/ note for the same requirement on a bare-metal
+# build.
+
+FROM node:22-slim AS dashboard-build
+WORKDIR /src/dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci
+COPY dashboard/ ./
+RUN npm run build
+
+FROM golang:1.26-bookworm AS go-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=dashboard-build /src/dashboard/dist ./dashboard/dist
+RUN CGO_ENABLED=0 go build -o /out/rvtx-controlplane ./cmd/controlplane
+
+FROM debian:bookworm-slim
+# ca-certificates: needed for the mail package's SMTP+STARTTLS
+# handshake to validate the relay's certificate -- without this,
+# invite/reset emails fail with a TLS verification error.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=go-build /out/rvtx-controlplane /usr/local/bin/rvtx-controlplane
+COPY migrations /opt/rvtx/migrations
+ENV RVTX_MIGRATIONS_DIR=/opt/rvtx/migrations
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/rvtx-controlplane"]

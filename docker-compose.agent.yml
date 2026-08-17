@@ -1,0 +1,31 @@
+# Deploy this on each mesh node, one instance per host -- not
+# alongside controlplane's compose file, since a real mesh only
+# exists across genuinely separate machines.
+#
+# network_mode: host + cap_add: NET_ADMIN are both required, not
+# optional: the agent creates and manages a real WireGuard interface
+# (device-level netlink operations via `wg`/`ip`) that has to be
+# visible to the host's own routing table and reachable from outside
+# the container's network namespace -- a bridge network can't do
+# either.
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: rv-tx-agent
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - rvtx-agent-key:/etc/rvtx
+    env_file:
+      - .env.agent
+
+volumes:
+  # Persists the node's WireGuard private key across container
+  # restarts/recreates -- losing it makes every reconnect look like a
+  # brand new node to the control plane and breaks existing peers'
+  # sessions until they reconcile.
+  rvtx-agent-key:

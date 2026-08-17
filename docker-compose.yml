@@ -1,0 +1,19 @@
+# Control plane only -- Postgres is expected to already exist
+# elsewhere (this project's own deployment reuses a Postgres instance
+# shared with other services, not a fresh one spun up here; point
+# RVTX_POSTGRES_DSN at whatever Postgres you actually have).
+#
+# See docker-compose.agent.yml for the per-node agent, deployed
+# separately on each mesh host -- it can't live in this same compose
+# file since it belongs on a different machine.
+services:
+  controlplane:
+    build:
+      context: .
+      dockerfile: Dockerfile.controlplane
+    image: rv-tx-controlplane
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env

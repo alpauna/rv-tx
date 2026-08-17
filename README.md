@@ -38,6 +38,15 @@ What Traefik has no concept of at all: one resource serving multiple *unrelated*
 - ACME: Traefik's static config on `builder` (`/opt/rvtx/traefik/traefik.yml`) has two `certificatesResolvers` (`letsencrypt-staging`, `letsencrypt`), both using the native `rfc2136` DNS-01 provider against the `rvtx-acme` TSIG key on dns01. An HTTP resource opts in via `cert_resolver: "letsencrypt-staging"` (or `"letsencrypt"`) in its `POST /resources` body.
 - The dashboard itself is `rv-tx.com` and `*.rv-tx.com` — two HTTP resources (`rv-tx-com`, `rv-tx-com-wildcard`) targeting `node-a-pg:8080` (the control plane's own listen port) with `cert_resolver: "letsencrypt"` (production). Both real production certs issued live, 2026-08-17. The apex/wildcard A records (`165.23.33.26`, builder's WAN IP) are `dynamic_hosts`-tracked in dnsmasq-ui, same mechanism as `ns1.rv-tx.com`.
 
+## Docker
+
+`Dockerfile.controlplane` (multi-stage: Vite build → Go build, with the dashboard's `dist/` baked in and `migrations/` copied to `/opt/rvtx/migrations`) and `Dockerfile.agent` (Go build + `wireguard-tools`/`iproute2` installed in the runtime image, since the agent shells out to real `wg`/`ip` rather than a pure-Go WireGuard stack — see Architecture above). Config for both is env-vars-only either way; see `controlplane.env.example`/`agent.env.example`.
+
+- `docker-compose.yml` — the control plane only. Postgres isn't included; point `RVTX_POSTGRES_DSN` at whatever Postgres already exists (this project's own deployment reuses one shared with other services, not a fresh instance).
+- `docker-compose.agent.yml` — one agent, deployed separately on each mesh host (can't share a compose file with the control plane — a real mesh only exists across genuinely different machines). Requires `network_mode: host` + `cap_add: NET_ADMIN`, both non-optional: the agent creates/manages a real WireGuard netlink interface that has to be visible to the host's own routing table, which a bridge network can't provide. Verified live (2026-08-17, on `builder`): `wg genkey | wg pubkey` and `ip link add ... type wireguard` both work correctly inside the container with exactly this capability/network combination.
+
+Both images build and the control plane has been smoke-tested end-to-end in a container (real migrations, real bootstrap-admin flow, `/healthz` 200) against a throwaway Postgres database — not yet used to replace either of the two systemd-deployed production instances (`pangolin-pg`, `builder`), which still run the bare binary. Migrating those over is a separate, deliberate step, not implied by this packaging existing.
+
 ## Milestones
 
 1. Core mesh coordination (WireGuard, Postgres, WebSocket)
@@ -48,6 +57,7 @@ What Traefik has no concept of at all: one resource serving multiple *unrelated*
 6. ACME DNS-01 automation via Traefik's native `rfc2136` provider — done, a real Let's Encrypt staging certificate has been obtained end-to-end through the real delegated zone (see the operational notes below for two real bugs found along the way)
 7. Dashboard (React SPA, embedded + auth) + wildcard-domain support — done, `rv-tx.com`/`*.rv-tx.com` both serve the dashboard over real production HTTPS
 8. Per-user accounts, roles, and email-based invite/password-reset — done, verified live end-to-end (invite → set password → login, forgot-password → reset → login with new password, and viewer-role 403s on every mutating route)
+9. Docker packaging for both the control plane and the agent — done, both images build and the control plane is smoke-tested in a container; not yet used to replace the production systemd deployments
 
 ## Known gaps
 
