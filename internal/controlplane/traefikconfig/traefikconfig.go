@@ -34,9 +34,17 @@ type protocolConfig struct {
 }
 
 type router struct {
-	Rule        string   `json:"rule"`
-	Service     string   `json:"service"`
-	EntryPoints []string `json:"entryPoints"`
+	Rule        string     `json:"rule"`
+	Service     string     `json:"service"`
+	EntryPoints []string   `json:"entryPoints"`
+	TLS         *routerTLS `json:"tls,omitempty"`
+}
+
+// routerTLS references a Traefik certificatesResolvers entry by name
+// (static config, e.g. a staging vs. production Let's Encrypt
+// resolver) -- only meaningful on HTTP routers.
+type routerTLS struct {
+	CertResolver string `json:"certResolver,omitempty"`
 }
 
 type service struct {
@@ -102,10 +110,15 @@ func Generate(resources []db.ResourceWithTargets) Config {
 			if r.Domain != nil && *r.Domain != "" {
 				rule = fmt.Sprintf("Host(`%s`)", *r.Domain)
 			}
+			var tls *routerTLS
+			if r.CertResolver != nil && *r.CertResolver != "" {
+				tls = &routerTLS{CertResolver: *r.CertResolver}
+			}
 			cfg.HTTP.Routers[r.Name] = router{
 				Rule:        rule,
 				Service:     r.Name,
 				EntryPoints: []string{r.EntryPoint},
+				TLS:         tls,
 			}
 
 			servers := make([]server, len(r.Targets))

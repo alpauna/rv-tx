@@ -36,11 +36,12 @@ type Target struct {
 // ResourceWithTargets is a resource joined with all of its backend
 // targets.
 type ResourceWithTargets struct {
-	Name       string
-	Protocol   string
-	Domain     *string
-	EntryPoint string
-	Targets    []Target
+	Name         string
+	Protocol     string
+	Domain       *string
+	EntryPoint   string
+	CertResolver *string
+	Targets      []Target
 }
 
 // CreateResource validates the target list for the given protocol,
@@ -51,7 +52,7 @@ type ResourceWithTargets struct {
 // unbounded pool (any number of targets, role ignored), tcp/udp
 // resources are at most a primary and a backup (not full load
 // balancing yet).
-func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, entryPoint string, targets []TargetSpec) error {
+func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, entryPoint string, certResolver *string, targets []TargetSpec) error {
 	if err := validateTargets(protocol, targets); err != nil {
 		return err
 	}
@@ -64,10 +65,10 @@ func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain 
 
 	var resourceID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO resources (name, protocol, domain, entry_point)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO resources (name, protocol, domain, entry_point, cert_resolver)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id::text
-	`, name, protocol, domain, entryPoint).Scan(&resourceID)
+	`, name, protocol, domain, entryPoint, certResolver).Scan(&resourceID)
 	if err != nil {
 		return fmt.Errorf("insert resource: %w", err)
 	}
@@ -156,7 +157,7 @@ func validateTargets(protocol string, targets []TargetSpec) error {
 // last_seen (no heartbeat to key off).
 func (db *DB) ListResourcesWithTargets(ctx context.Context) ([]ResourceWithTargets, error) {
 	rows, err := db.Pool.Query(ctx, `
-		SELECT r.id::text, r.name, r.protocol, r.domain, r.entry_point,
+		SELECT r.id::text, r.name, r.protocol, r.domain, r.entry_point, r.cert_resolver,
 		       COALESCE(host(n.mesh_ip), rt.address), rt.port, rt.role,
 		       (rt.node_id IS NULL), n.last_seen
 		FROM resources r
@@ -175,18 +176,18 @@ func (db *DB) ListResourcesWithTargets(ctx context.Context) ([]ResourceWithTarge
 	for rows.Next() {
 		var (
 			id, name, protocol, entryPoint, address, role string
-			domain                                        *string
+			domain, certResolver                          *string
 			port                                          int
 			external                                      bool
 			lastSeen                                      *time.Time
 		)
-		if err := rows.Scan(&id, &name, &protocol, &domain, &entryPoint, &address, &port, &role, &external, &lastSeen); err != nil {
+		if err := rows.Scan(&id, &name, &protocol, &domain, &entryPoint, &certResolver, &address, &port, &role, &external, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan resource target: %w", err)
 		}
 
 		r, ok := byID[id]
 		if !ok {
-			r = &ResourceWithTargets{Name: name, Protocol: protocol, Domain: domain, EntryPoint: entryPoint}
+			r = &ResourceWithTargets{Name: name, Protocol: protocol, Domain: domain, EntryPoint: entryPoint, CertResolver: certResolver}
 			byID[id] = r
 			order = append(order, id)
 		}

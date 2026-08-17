@@ -44,6 +44,24 @@ func TestGenerate_HTTP(t *testing.T) {
 	if svc.LoadBalancer.Sticky != nil || svc.LoadBalancer.HealthCheck != nil {
 		t.Errorf("single-target resource should not get sticky/healthCheck, got %+v", svc.LoadBalancer)
 	}
+	if r.TLS != nil {
+		t.Errorf("no cert_resolver set, expected no TLS block, got %+v", r.TLS)
+	}
+}
+
+func TestGenerate_HTTPCertResolver(t *testing.T) {
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "app", Protocol: "http", Domain: strPtr("app.example.com"), EntryPoint: "web",
+			CertResolver: strPtr("letsencrypt-staging"),
+			Targets:      []db.Target{{Address: "100.100.0.1", Port: 8000, Role: "primary"}},
+		},
+	})
+
+	r := cfg.HTTP.Routers["app"]
+	if r.TLS == nil || r.TLS.CertResolver != "letsencrypt-staging" {
+		t.Errorf("expected tls.certResolver \"letsencrypt-staging\", got %+v", r.TLS)
+	}
 }
 
 func TestGenerate_HTTPMultiTargetSticky(t *testing.T) {

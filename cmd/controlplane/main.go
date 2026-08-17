@@ -78,11 +78,12 @@ func traefikConfigHandler(database *db.DB) http.HandlerFunc {
 // have any number (a load-balanced pool), tcp resources at most a
 // primary and a backup (validated in db.CreateResource).
 type createResourceRequest struct {
-	Name       string           `json:"name"`
-	Protocol   string           `json:"protocol"`
-	Domain     string           `json:"domain,omitempty"`
-	EntryPoint string           `json:"entry_point"`
-	Targets    []targetSpecJSON `json:"targets"`
+	Name         string           `json:"name"`
+	Protocol     string           `json:"protocol"`
+	Domain       string           `json:"domain,omitempty"`
+	EntryPoint   string           `json:"entry_point"`
+	CertResolver string           `json:"cert_resolver,omitempty"` // http only -- name of a Traefik certificatesResolvers entry (static config)
+	Targets      []targetSpecJSON `json:"targets"`
 }
 
 // targetSpecJSON: exactly one of NodeName or Address must be set --
@@ -113,13 +114,17 @@ func createResourceHandler(database *db.DB) http.HandlerFunc {
 		if req.Domain != "" {
 			domain = &req.Domain
 		}
+		var certResolver *string
+		if req.CertResolver != "" {
+			certResolver = &req.CertResolver
+		}
 
 		targets := make([]db.TargetSpec, len(req.Targets))
 		for i, t := range req.Targets {
 			targets[i] = db.TargetSpec{NodeName: t.NodeName, Address: t.Address, Port: t.Port, Role: t.Role}
 		}
 
-		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, targets)
+		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, certResolver, targets)
 		if err != nil {
 			log.Printf("create resource %q: %v", req.Name, err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
