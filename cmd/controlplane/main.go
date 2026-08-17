@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -93,6 +94,7 @@ func main() {
 
 	// Authenticated, admin only (mutations).
 	mux.Handle("POST /api/resources", requireAdmin(sessionSecret, createResourceHandler(database)))
+	mux.Handle("PUT /api/resources/{name}", requireAdmin(sessionSecret, updateResourceHandler(database)))
 	mux.Handle("DELETE /api/resources/{name}", requireAdmin(sessionSecret, deleteResourceHandler(database)))
 	mux.Handle("GET /api/users", requireAdmin(sessionSecret, listUsersHandler(database)))
 	mux.Handle("POST /api/users", requireAdmin(sessionSecret, inviteUserHandler(database, smtpCfg, baseURL)))
@@ -288,9 +290,9 @@ type targetSpecJSON struct {
 
 func createResourceHandler(database *db.DB) sessionHandler {
 	return func(w http.ResponseWriter, r *http.Request, _ auth.Session) {
-		var req createResourceRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json body: "+err.Error(), http.StatusBadRequest)
+		req, targets, err := decodeResourceRequest(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -303,12 +305,7 @@ func createResourceHandler(database *db.DB) sessionHandler {
 			certResolver = &req.CertResolver
 		}
 
-		targets := make([]db.TargetSpec, len(req.Targets))
-		for i, t := range req.Targets {
-			targets[i] = db.TargetSpec{NodeName: t.NodeName, Address: t.Address, Port: t.Port, Role: t.Role}
-		}
-
-		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, certResolver, req.TargetScheme, req.TargetSkipVerify, req.Sticky, targets)
+		err = database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, certResolver, req.TargetScheme, req.TargetSkipVerify, req.Sticky, targets)
 		if err != nil {
 			log.Printf("create resource %q: %v", req.Name, err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -317,6 +314,53 @@ func createResourceHandler(database *db.DB) sessionHandler {
 
 		w.WriteHeader(http.StatusCreated)
 	}
+}
+
+// updateResourceHandler replaces an existing resource's fields and
+// target list. The name comes from the URL path, not the body -- the
+// body's own Name field (if any) is ignored, renaming isn't supported
+// via this route (delete and recreate instead).
+func updateResourceHandler(database *db.DB) sessionHandler {
+	return func(w http.ResponseWriter, r *http.Request, _ auth.Session) {
+		name := r.PathValue("name")
+		req, targets, err := decodeResourceRequest(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		var domain *string
+		if req.Domain != "" {
+			domain = &req.Domain
+		}
+		var certResolver *string
+		if req.CertResolver != "" {
+			certResolver = &req.CertResolver
+		}
+
+		err = database.UpdateResource(r.Context(), name, req.Protocol, domain, req.EntryPoint, certResolver, req.TargetScheme, req.TargetSkipVerify, req.Sticky, targets)
+		if err != nil {
+			log.Printf("update resource %q: %v", name, err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+// decodeResourceRequest parses a create/update resource body -- shared
+// so the two handlers can't drift on how targets get converted.
+func decodeResourceRequest(r *http.Request) (createResourceRequest, []db.TargetSpec, error) {
+	var req createResourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return req, nil, fmt.Errorf("invalid json body: %w", err)
+	}
+	targets := make([]db.TargetSpec, len(req.Targets))
+	for i, t := range req.Targets {
+		targets[i] = db.TargetSpec{NodeName: t.NodeName, Address: t.Address, Port: t.Port, Role: t.Role}
+	}
+	return req, targets, nil
 }
 
 func deleteResourceHandler(database *db.DB) sessionHandler {

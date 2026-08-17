@@ -16,16 +16,56 @@ function targetToPayload(t) {
   return payload;
 }
 
-function NewResourceForm({ nodes, onCreated }) {
-  const [protocol, setProtocol] = useState('http');
-  const [name, setName] = useState('');
-  const [domain, setDomain] = useState('');
-  const [entryPoint, setEntryPoint] = useState('websecure');
-  const [certResolver, setCertResolver] = useState('');
-  const [targetScheme, setTargetScheme] = useState('http');
-  const [targetSkipVerify, setTargetSkipVerify] = useState(false);
-  const [sticky, setSticky] = useState(false);
-  const [targets, setTargets] = useState([emptyTarget()]);
+// Converts an API Target (resolved address, optional node_name) back
+// into the form's editable target shape -- node_name is only present
+// for a mesh-node-backed target, so its presence (not `external`) is
+// what tells the form which mode to preselect.
+function targetFromResource(t) {
+  return {
+    kind: t.node_name ? 'node' : 'external',
+    node_name: t.node_name || '',
+    address: t.node_name ? '' : t.address,
+    port: String(t.port),
+    role: t.role || 'primary',
+  };
+}
+
+function initialFormState(editing) {
+  if (!editing) {
+    return {
+      protocol: 'http', name: '', domain: '', entryPoint: 'websecure', certResolver: '',
+      targetScheme: 'http', targetSkipVerify: false, sticky: false, targets: [emptyTarget()],
+    };
+  }
+  return {
+    protocol: editing.protocol,
+    name: editing.name,
+    domain: editing.domain || '',
+    entryPoint: editing.entry_point,
+    certResolver: editing.cert_resolver || '',
+    targetScheme: editing.target_scheme || 'http',
+    targetSkipVerify: !!editing.target_skip_verify,
+    sticky: !!editing.sticky,
+    targets: editing.targets.map(targetFromResource),
+  };
+}
+
+// Handles both create (editing == null) and edit (editing == the
+// resource being changed) -- given a `key` prop keyed on the editing
+// target from the parent, React remounts this fresh with the right
+// initial state instead of needing a separate effect to resync state
+// when switching what's being edited.
+function ResourceForm({ nodes, editing, onSaved, onCancel }) {
+  const init = initialFormState(editing);
+  const [protocol, setProtocol] = useState(init.protocol);
+  const [name, setName] = useState(init.name);
+  const [domain, setDomain] = useState(init.domain);
+  const [entryPoint, setEntryPoint] = useState(init.entryPoint);
+  const [certResolver, setCertResolver] = useState(init.certResolver);
+  const [targetScheme, setTargetScheme] = useState(init.targetScheme);
+  const [targetSkipVerify, setTargetSkipVerify] = useState(init.targetSkipVerify);
+  const [sticky, setSticky] = useState(init.sticky);
+  const [targets, setTargets] = useState(init.targets);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -45,25 +85,30 @@ function NewResourceForm({ nodes, onCreated }) {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    const payload = {
+      name,
+      protocol,
+      domain: protocol === 'http' ? domain : undefined,
+      entry_point: entryPoint,
+      cert_resolver: protocol === 'http' && certResolver ? certResolver : undefined,
+      target_scheme: protocol === 'http' ? targetScheme : undefined,
+      target_skip_verify: protocol === 'http' && targetScheme === 'https' ? targetSkipVerify : undefined,
+      sticky: protocol === 'http' ? sticky : undefined,
+      targets: targets.map(targetToPayload),
+    };
     try {
-      await api.createResource({
-        name,
-        protocol,
-        domain: protocol === 'http' ? domain : undefined,
-        entry_point: entryPoint,
-        cert_resolver: protocol === 'http' && certResolver ? certResolver : undefined,
-        target_scheme: protocol === 'http' ? targetScheme : undefined,
-        target_skip_verify: protocol === 'http' && targetScheme === 'https' ? targetSkipVerify : undefined,
-        sticky: protocol === 'http' ? sticky : undefined,
-        targets: targets.map(targetToPayload),
-      });
-      setName('');
-      setDomain('');
-      setSticky(false);
-      setTargetScheme('http');
-      setTargetSkipVerify(false);
-      setTargets([emptyTarget()]);
-      onCreated();
+      if (editing) {
+        await api.updateResource(editing.name, payload);
+      } else {
+        await api.createResource(payload);
+        setName('');
+        setDomain('');
+        setSticky(false);
+        setTargetScheme('http');
+        setTargetSkipVerify(false);
+        setTargets([emptyTarget()]);
+      }
+      onSaved();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -73,7 +118,7 @@ function NewResourceForm({ nodes, onCreated }) {
 
   return (
     <form onSubmit={onSubmit} className="panel">
-      <h3 style={{ marginTop: 0 }}>New resource</h3>
+      <h3 style={{ marginTop: 0 }}>{editing ? `Edit resource: ${editing.name}` : 'New resource'}</h3>
       <div className="row">
         <div className="field">
           <label htmlFor="r-protocol">Protocol</label>
@@ -83,7 +128,7 @@ function NewResourceForm({ nodes, onCreated }) {
         </div>
         <div className="field">
           <label htmlFor="r-name">Name</label>
-          <input id="r-name" value={name} onChange={(e) => setName(e.target.value)} required />
+          <input id="r-name" value={name} onChange={(e) => setName(e.target.value)} required disabled={!!editing} title={editing ? 'Renaming isn\'t supported here -- delete and recreate instead.' : undefined} />
         </div>
         <div className="field">
           <label htmlFor="r-entrypoint">Entry point</label>
@@ -177,7 +222,12 @@ function NewResourceForm({ nodes, onCreated }) {
       </div>
 
       {error && <p className="error">{error}</p>}
-      <button type="submit" disabled={busy}>Create resource</button>
+      <div className="row">
+        <button type="submit" disabled={busy}>{editing ? 'Save changes' : 'Create resource'}</button>
+        {editing && (
+          <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
+        )}
+      </div>
     </form>
   );
 }
@@ -252,6 +302,7 @@ export default function Resources() {
   const [nodes, setNodes] = useState([]);
   const [error, setError] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
+  const [editing, setEditing] = useState(null);
 
   function load() {
     api.listResources().then(setResources).catch((err) => setError(err.message));
@@ -266,10 +317,16 @@ export default function Resources() {
     if (!confirm(`Delete resource "${name}"?`)) return;
     try {
       await api.deleteResource(name);
+      if (editing && editing.name === name) setEditing(null);
       load();
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  function onSaved() {
+    setEditing(null);
+    load();
   }
 
   return (
@@ -313,7 +370,8 @@ export default function Resources() {
                     )}
                   </td>
                   {isAdmin && (
-                    <td>
+                    <td style={{ display: 'flex', gap: '0.5rem' }}>
+                      <button className="secondary" onClick={() => setEditing(r)}>Edit</button>
                       <button className="danger" onClick={() => onDelete(r.name)}>Delete</button>
                     </td>
                   )}
@@ -326,7 +384,13 @@ export default function Resources() {
 
       {isAdmin && (
         <>
-          <NewResourceForm nodes={nodes} onCreated={load} />
+          <ResourceForm
+            key={editing ? editing.name : 'new'}
+            nodes={nodes}
+            editing={editing}
+            onSaved={onSaved}
+            onCancel={() => setEditing(null)}
+          />
 
           <div className="panel">
             <button type="button" className="secondary" onClick={() => setShowWizard((v) => !v)}>

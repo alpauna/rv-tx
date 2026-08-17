@@ -12,6 +12,10 @@ Resources can target either a mesh node (`node_name`) or a raw external `ip:port
 
 - `dashboard/` — a React+Vite SPA, embedded into the control plane binary via `embed.FS` (`dashboard/embed.go`) and served at `/`. Everything under `/api/*` requires a session cookie proving a real per-user login (see "Accounts, roles, and email" below); `/ws/agent`, `/healthz`, and `/traefik/config` stay unauthenticated by design (agents and Traefik itself can't send credentials). `dashboard/dist/` is gitignored (build output) but must exist before `go build ./cmd/controlplane` will produce a real dashboard — run `npm --prefix dashboard ci && npm --prefix dashboard run build` first on a fresh clone.
 
+### Editing an existing resource
+
+`PUT /api/resources/{name}` replaces everything about a resource except its name (renaming isn't supported this way — delete and recreate instead) — same validation as create, so an edit can't leave a resource in a state that was never valid to begin with. The one real subtlety: `GET /api/resources`/`GET /api/nodes`-adjacent responses only ever showed a target's *resolved* address, never which mesh node it came from — editing a form built on that alone would've silently turned a live-tracked node into a frozen static address the moment you saved. Fixed by exposing `node_name` on each target in the API response (`null` for an external/non-mesh target), so the edit form can tell the two apart and preserve live tracking. Verified live: edited a resource with a mesh-node target (changed its entry point, turned sticky on) and confirmed the target was still resolving that node's live `mesh_ip` afterward, not a stale snapshot.
+
 ### Accounts, roles, and email
 
 No open signup — every account is created by an admin inviting an email address (`POST /api/users`), which emails a one-time link (7-day expiry) to set a password. Two roles: `admin` (full read/write, including managing other users) and `viewer` (read-only — every mutating `/api/*` route 403s for a viewer session, enforced server-side in `requireAdmin`, not just hidden in the UI). Forgot-password works the same way (1-hour token) and deliberately returns an identical response whether or not the email is registered, so it can't be used to enumerate accounts.
@@ -68,6 +72,7 @@ Both images build and the control plane has been smoke-tested end-to-end in a co
 9. Docker packaging for both the control plane and the agent — done, both images build and the control plane is smoke-tested in a container; not yet used to replace the production systemd deployments
 10. HTTPS backend targets + self-signed skip-verify — done, verified live against a real self-signed target (Proxmox's own web UI)
 11. Sticky sessions as an explicit per-resource checkbox, decoupled from target count — done, verified live in both directions
+12. Edit an existing resource (`PUT /api/resources/{name}`) — done, verified live that a mesh-node-backed target survives an edit as a live-tracked node, not frozen into a static address
 
 ## Known gaps
 

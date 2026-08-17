@@ -38,6 +38,7 @@ export const api = {
   listNodes: () => request('/nodes'),
   listResources: () => request('/resources'),
   createResource: (resource) => request('/resources', { method: 'POST', body: JSON.stringify(resource) }),
+  updateResource: (name, resource) => request(`/resources/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(resource) }),
   deleteResource: (name) => request(`/resources/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   listUsers: () => request('/users'),
   inviteUser: (email, role) => request('/users', { method: 'POST', body: JSON.stringify({ email, role }) }),
