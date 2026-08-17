@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"rv-tx/internal/agent/wgmanager"
@@ -27,6 +28,12 @@ func main() {
 	keyPath := envOr("RVTX_KEY_PATH", "/etc/rvtx/private.key")
 	listenPort := envOrInt("RVTX_LISTEN_PORT", 51820)
 	heartbeatSeconds := envOrInt("RVTX_HEARTBEAT_SECONDS", 15)
+	// Optional -- CIDRs this node relays for beyond its own mesh IP
+	// (e.g. "192.168.7.0/24"), comma-separated. Requires the node's
+	// own host to actually forward/MASQUERADE that traffic -- see
+	// README's rv-route subnet-relay section for the sysctl/iptables
+	// setup, not automated by the agent itself.
+	advertisedSubnets := envOrList("RVTX_ADVERTISE_SUBNETS")
 
 	privateKey, publicKey, err := loadOrCreateKeypair(keyPath)
 	if err != nil {
@@ -45,6 +52,7 @@ func main() {
 		HeartbeatInterval: time.Duration(heartbeatSeconds) * time.Second,
 		EndpointOverride:  endpointOverride,
 		WG:                wg,
+		AdvertisedSubnets: advertisedSubnets,
 	}
 
 	client.Run(context.Background())
@@ -100,6 +108,25 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envOrList parses a comma-separated env var into a string slice,
+// trimming whitespace around each entry -- nil (not an empty slice)
+// when unset, so it round-trips cleanly as an omitted JSON field.
+func envOrList(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func envOrInt(key string, fallback int) int {

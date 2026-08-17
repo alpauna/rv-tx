@@ -40,6 +40,13 @@ type RegisterPayload struct {
 	PublicKey string `json:"public_key"`
 	Port      int    `json:"port"`
 	Endpoint  string `json:"endpoint,omitempty"`
+	// AdvertisedSubnets are extra CIDRs (beyond this node's own mesh
+	// IP) that this node can relay traffic for -- e.g. a node sitting
+	// on 192.168.7.0/24 advertising that whole subnet, via MASQUERADE
+	// on its own host, so every other mesh peer can reach it through
+	// the tunnel without needing their own routing to it. Empty for a
+	// normal node.
+	AdvertisedSubnets []string `json:"advertised_subnets,omitempty"`
 }
 
 // RegisteredPayload is the control plane's reply to Register: the mesh
@@ -64,7 +71,8 @@ type PeerListPayload struct {
 // PeerInfo describes one mesh node as seen by another node's WireGuard
 // interface: enough to configure a peer entry.
 type PeerInfo struct {
-	PublicKey string `json:"public_key"`
-	MeshIP    string `json:"mesh_ip"`
-	Endpoint  string `json:"endpoint,omitempty"`
+	PublicKey         string   `json:"public_key"`
+	MeshIP            string   `json:"mesh_ip"`
+	Endpoint          string   `json:"endpoint,omitempty"`
+	AdvertisedSubnets []string `json:"advertised_subnets,omitempty"`
 }

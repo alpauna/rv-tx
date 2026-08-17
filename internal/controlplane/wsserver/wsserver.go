@@ -130,7 +130,7 @@ func (s *Server) handleRegister(ctx context.Context, conn *websocket.Conn, remot
 	// candidateIP (ON CONFLICT DO UPDATE only touches public_key/
 	// last_endpoint/last_seen, not mesh_ip) -- candidateIP is only
 	// actually used for brand new nodes.
-	meshIP, err := s.DB.UpsertNode(ctx, p.Name, p.PublicKey, candidateIP, endpoint)
+	meshIP, err := s.DB.UpsertNode(ctx, p.Name, p.PublicKey, candidateIP, endpoint, p.AdvertisedSubnets)
 	if err != nil {
 		return err
 	}

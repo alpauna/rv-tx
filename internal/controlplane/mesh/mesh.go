@@ -72,9 +72,10 @@ func PeerListFor(publicKey string, nodes []db.Node) []protocol.PeerInfo {
 			endpoint = *n.LastEndpoint
 		}
 		peers = append(peers, protocol.PeerInfo{
-			PublicKey: n.PublicKey,
-			MeshIP:    n.MeshIP,
-			Endpoint:  endpoint,
+			PublicKey:         n.PublicKey,
+			MeshIP:            n.MeshIP,
+			Endpoint:          endpoint,
+			AdvertisedSubnets: n.AdvertisedSubnets,
 		})
 	}
 	return peers

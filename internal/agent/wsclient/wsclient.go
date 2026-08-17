@@ -30,6 +30,9 @@ type Client struct {
 	// differs from the TCP connection's source port).
 	EndpointOverride string
 	WG               *wgmanager.Manager
+	// AdvertisedSubnets are extra CIDRs this node relays for -- see
+	// protocol.RegisterPayload's comment. Empty for a normal node.
+	AdvertisedSubnets []string
 }
 
 // Run connects and reconnects forever with exponential backoff (capped),
@@ -72,10 +75,11 @@ func (c *Client) connectOnce(ctx context.Context) error {
 	if err := conn.WriteJSON(protocol.Envelope{
 		Type: protocol.TypeRegister,
 		Payload: protocol.RegisterPayload{
-			Name:      c.Name,
-			PublicKey: c.PublicKey,
-			Port:      c.ListenPort,
-			Endpoint:  c.EndpointOverride,
+			Name:              c.Name,
+			PublicKey:         c.PublicKey,
+			Port:              c.ListenPort,
+			Endpoint:          c.EndpointOverride,
+			AdvertisedSubnets: c.AdvertisedSubnets,
 		},
 	}); err != nil {
 		return err

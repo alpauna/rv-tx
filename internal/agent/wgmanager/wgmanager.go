@@ -120,18 +120,21 @@ func (m *Manager) hasAddress(meshIP string) (bool, error) {
 }
 
 // Reconcile diffs the interface's current peers against the desired
-// list and adds/updates/removes to match exactly. Also adds/removes the
-// kernel routing table entry for each peer's mesh IP: `wg set` alone
-// only configures WireGuard's own crypto-key routing (which peer to
-// encrypt an outbound packet for once it's already headed out this
-// interface) -- it does NOT touch the kernel's regular routing table, so
-// without an explicit `ip route`, the kernel never sends traffic to a
-// peer's mesh IP out this interface in the first place. `wg-quick`
-// normally does this automatically by parsing AllowedIPs from its config
-// file; managing the interface directly via `wg`/`ip` means doing it
-// ourselves. Confirmed missing was the actual cause of a real "zero
-// packets leave the host at all" failure during testing, not just a
-// theoretical concern.
+// list and adds/updates/removes to match exactly. Also adds/removes
+// the kernel routing table entry for each entry in a peer's allowed-ips
+// (its own mesh IP, plus any subnets it advertises as a relay -- see
+// AdvertisedSubnets): `wg set` alone only configures WireGuard's own
+// crypto-key routing (which peer to encrypt an outbound packet for
+// once it's already headed out this interface) -- it does NOT touch
+// the kernel's regular routing table, so without an explicit
+// `ip route`, the kernel never sends traffic to a peer's mesh IP (or
+// a subnet it relays) out this interface in the first place.
+// `wg-quick` normally does this automatically by parsing AllowedIPs
+// from its config file; managing the interface directly via `wg`/`ip`
+// means doing it ourselves. The missing-route class of bug was
+// confirmed live twice already in this project (once for a peer's own
+// mesh IP, during the very first mesh test) -- treat every entry in
+// allowed-ips as needing its own route, not just the first one.
 func (m *Manager) Reconcile(desired []protocol.PeerInfo) error {
 	current, err := m.currentPeers()
 	if err != nil {
@@ -143,22 +146,24 @@ func (m *Manager) Reconcile(desired []protocol.PeerInfo) error {
 		desiredByKey[p.PublicKey] = p
 	}
 
-	for pubKey, allowedIP := range current {
+	for pubKey, allowedIPs := range current {
 		if _, want := desiredByKey[pubKey]; !want {
 			if err := run("wg", "set", m.Interface, "peer", pubKey, "remove"); err != nil {
 				return fmt.Errorf("remove peer %s: %w", pubKey, err)
 			}
-			// Best-effort: route may already be gone (e.g. interface
+			// Best-effort: routes may already be gone (e.g. interface
 			// recreated), don't fail reconciliation over cleanup.
-			if allowedIP != "" {
-				_ = run("ip", "route", "del", allowedIP, "dev", m.Interface)
+			for _, cidr := range allowedIPs {
+				_ = run("ip", "route", "del", cidr, "dev", m.Interface)
 			}
 		}
 	}
 
 	for _, p := range desired {
+		allowedIPs := append([]string{p.MeshIP + "/32"}, p.AdvertisedSubnets...)
+
 		args := []string{"set", m.Interface, "peer", p.PublicKey,
-			"allowed-ips", p.MeshIP + "/32"}
+			"allowed-ips", strings.Join(allowedIPs, ",")}
 		if p.Endpoint != "" {
 			args = append(args, "endpoint", p.Endpoint)
 		}
@@ -166,21 +171,23 @@ func (m *Manager) Reconcile(desired []protocol.PeerInfo) error {
 			return fmt.Errorf("set peer %s: %w", p.PublicKey, err)
 		}
 
-		hasRoute, err := m.hasRoute(p.MeshIP)
-		if err != nil {
-			return fmt.Errorf("check route for %s: %w", p.MeshIP, err)
-		}
-		if !hasRoute {
-			if err := run("ip", "route", "add", p.MeshIP+"/32", "dev", m.Interface); err != nil {
-				return fmt.Errorf("add route for %s: %w", p.MeshIP, err)
+		for _, cidr := range allowedIPs {
+			hasRoute, err := m.hasRoute(cidr)
+			if err != nil {
+				return fmt.Errorf("check route for %s: %w", cidr, err)
+			}
+			if !hasRoute {
+				if err := run("ip", "route", "add", cidr, "dev", m.Interface); err != nil {
+					return fmt.Errorf("add route for %s: %w", cidr, err)
+				}
 			}
 		}
 	}
 	return nil
 }
 
-func (m *Manager) hasRoute(meshIP string) (bool, error) {
-	out, err := exec.Command("ip", "route", "show", meshIP+"/32", "dev", m.Interface).Output()
+func (m *Manager) hasRoute(cidr string) (bool, error) {
+	out, err := exec.Command("ip", "route", "show", cidr, "dev", m.Interface).Output()
 	if err != nil {
 		return false, fmt.Errorf("ip route show: %w", err)
 	}
@@ -188,32 +195,46 @@ func (m *Manager) hasRoute(meshIP string) (bool, error) {
 }
 
 // currentPeers returns the public keys currently configured on the
-// interface, mapped to their current allowed-ips (needed to clean up
-// routes for peers being removed), via `wg show <iface> allowed-ips`.
-func (m *Manager) currentPeers() (map[string]string, error) {
+// interface, mapped to their current allowed-ips list (needed to
+// clean up every route for a peer being removed), via
+// `wg show <iface> allowed-ips`. WireGuard reports a peer's
+// allowed-ips as a single comma-separated field (e.g.
+// "10.0.0.1/32,192.168.7.0/24"), so this splits on "," rather than
+// treating the whole field as one CIDR.
+func (m *Manager) currentPeers() (map[string][]string, error) {
 	out, err := exec.Command("wg", "show", m.Interface, "allowed-ips").Output()
 	if err != nil {
 		// A fresh interface with no peers yet exits non-zero on some wg
 		// versions with empty output -- treat that as "no peers", not
 		// an error, rather than failing reconciliation on first run.
 		if len(out) == 0 {
-			return map[string]string{}, nil
+			return map[string][]string{}, nil
 		}
 		return nil, err
 	}
-	peers := map[string]string{}
+	peers := map[string][]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
 		}
+		// `wg show <iface> allowed-ips` separates multiple CIDRs for
+		// the same peer with a space, not a comma (confirmed live --
+		// a real cleanup bug hit exactly this: a relay peer's second
+		// CIDR was silently dropped by an earlier version of this
+		// parser that only looked at fields[1], leaking its route on
+		// peer removal). Comma is only `wg set`'s *input* syntax for
+		// allowed-ips, not this command's output.
 		fields := strings.Fields(line)
-		if len(fields) >= 1 {
-			allowedIP := ""
-			if len(fields) >= 2 {
-				allowedIP = fields[1]
-			}
-			peers[fields[0]] = allowedIP
+		if len(fields) == 0 {
+			continue
 		}
+		var allowedIPs []string
+		for _, f := range fields[1:] {
+			if f != "(none)" {
+				allowedIPs = append(allowedIPs, f)
+			}
+		}
+		peers[fields[0]] = allowedIPs
 	}
 	return peers, nil
 }

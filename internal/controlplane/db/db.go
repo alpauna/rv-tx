@@ -33,12 +33,13 @@ func (db *DB) Close() {
 
 // Node mirrors the nodes table.
 type Node struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	PublicKey    string     `json:"public_key"`
-	MeshIP       string     `json:"mesh_ip"`
-	LastEndpoint *string    `json:"last_endpoint"`
-	LastSeen     *time.Time `json:"last_seen"`
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	PublicKey         string     `json:"public_key"`
+	MeshIP            string     `json:"mesh_ip"`
+	LastEndpoint      *string    `json:"last_endpoint"`
+	LastSeen          *time.Time `json:"last_seen"`
+	AdvertisedSubnets []string   `json:"advertised_subnets"`
 }
 
 // UsedMeshIPs returns every mesh_ip currently allocated, for the mesh
@@ -71,17 +72,21 @@ func (db *DB) UsedMeshIPs(ctx context.Context) ([]string, error) {
 // register is handled -- closes a small gap where a freshly registered
 // node previously had no endpoint until its first heartbeat landed.
 // Returns the node's final mesh_ip.
-func (db *DB) UpsertNode(ctx context.Context, name, publicKey, meshIP, endpoint string) (string, error) {
+func (db *DB) UpsertNode(ctx context.Context, name, publicKey, meshIP, endpoint string, advertisedSubnets []string) (string, error) {
+	if advertisedSubnets == nil {
+		advertisedSubnets = []string{}
+	}
 	var finalMeshIP string
 	err := db.Pool.QueryRow(ctx, `
-		INSERT INTO nodes (name, public_key, mesh_ip, last_endpoint, last_seen)
-		VALUES ($1, $2, $3, $4, now())
+		INSERT INTO nodes (name, public_key, mesh_ip, last_endpoint, last_seen, advertised_subnets)
+		VALUES ($1, $2, $3, $4, now(), $5)
 		ON CONFLICT (name) DO UPDATE
 			SET public_key = EXCLUDED.public_key,
 			    last_endpoint = EXCLUDED.last_endpoint,
-			    last_seen = now()
+			    last_seen = now(),
+			    advertised_subnets = EXCLUDED.advertised_subnets
 		RETURNING host(mesh_ip)
-	`, name, publicKey, meshIP, endpoint).Scan(&finalMeshIP)
+	`, name, publicKey, meshIP, endpoint, advertisedSubnets).Scan(&finalMeshIP)
 	if err != nil {
 		return "", fmt.Errorf("upsert node: %w", err)
 	}
@@ -106,7 +111,7 @@ func (db *DB) TouchLastSeen(ctx context.Context, publicKey string) error {
 // ListNodes returns every registered node, for peer-list computation.
 func (db *DB) ListNodes(ctx context.Context) ([]Node, error) {
 	rows, err := db.Pool.Query(ctx, `
-		SELECT id::text, name, public_key, host(mesh_ip), last_endpoint, last_seen
+		SELECT id::text, name, public_key, host(mesh_ip), last_endpoint, last_seen, advertised_subnets
 		FROM nodes
 	`)
 	if err != nil {
@@ -117,7 +122,7 @@ func (db *DB) ListNodes(ctx context.Context) ([]Node, error) {
 	var nodes []Node
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Name, &n.PublicKey, &n.MeshIP, &n.LastEndpoint, &n.LastSeen); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.PublicKey, &n.MeshIP, &n.LastEndpoint, &n.LastSeen, &n.AdvertisedSubnets); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		nodes = append(nodes, n)
