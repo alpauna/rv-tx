@@ -123,6 +123,69 @@ func TestGenerate_HTTPWildcardDomainExplicitTLSDomain(t *testing.T) {
 	}
 }
 
+func TestGenerate_HTTPDefaultScheme(t *testing.T) {
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "app", Protocol: "http", Domain: strPtr("app.example.com"), EntryPoint: "web",
+			// TargetScheme deliberately left "" -- must default to http.
+			Targets: []db.Target{{Address: "100.100.0.1", Port: 8000, Role: "primary"}},
+		},
+	})
+
+	svc := cfg.HTTP.Services["app"]
+	if svc.LoadBalancer.Servers[0].URL != "http://100.100.0.1:8000" {
+		t.Errorf("got server %+v, want http:// scheme by default", svc.LoadBalancer.Servers[0])
+	}
+	if svc.LoadBalancer.ServersTransport != "" {
+		t.Errorf("expected no serversTransport for a plain http target, got %q", svc.LoadBalancer.ServersTransport)
+	}
+}
+
+func TestGenerate_HTTPSTargetInsecureSkipVerify(t *testing.T) {
+	// A backend that only serves HTTPS with a self-signed cert (e.g.
+	// Proxmox's own web UI) needs both the https:// scheme AND an
+	// insecureSkipVerify serversTransport -- confirm both land
+	// correctly and that the transport is scoped per-resource.
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "proxmox-ui", Protocol: "http", Domain: strPtr("pve.example.com"), EntryPoint: "web",
+			TargetScheme: "https", TargetSkipVerify: true,
+			Targets: []db.Target{{Address: "100.100.0.1", Port: 8006, Role: "primary"}},
+		},
+	})
+
+	svc := cfg.HTTP.Services["proxmox-ui"]
+	if svc.LoadBalancer.Servers[0].URL != "https://100.100.0.1:8006" {
+		t.Errorf("got server %+v, want https:// scheme", svc.LoadBalancer.Servers[0])
+	}
+	wantTransport := "proxmox-ui-insecure"
+	if svc.LoadBalancer.ServersTransport != wantTransport {
+		t.Errorf("got serversTransport %q, want %q", svc.LoadBalancer.ServersTransport, wantTransport)
+	}
+	transport, ok := cfg.HTTP.ServersTransports[wantTransport]
+	if !ok || !transport.InsecureSkipVerify {
+		t.Errorf("expected serversTransports[%q].insecureSkipVerify = true, got %+v (present=%v)", wantTransport, transport, ok)
+	}
+}
+
+func TestGenerate_HTTPSTargetWithoutSkipVerify(t *testing.T) {
+	// A real (non-self-signed) HTTPS backend shouldn't get a
+	// serversTransport at all -- Traefik's default already verifies
+	// normally, no need to opt into anything.
+	cfg := Generate([]db.ResourceWithTargets{
+		{
+			Name: "real-https-backend", Protocol: "http", Domain: strPtr("app.example.com"), EntryPoint: "web",
+			TargetScheme: "https",
+			Targets:      []db.Target{{Address: "100.100.0.1", Port: 443, Role: "primary"}},
+		},
+	})
+
+	svc := cfg.HTTP.Services["real-https-backend"]
+	if svc.LoadBalancer.ServersTransport != "" {
+		t.Errorf("expected no serversTransport when target_skip_verify is false, got %q", svc.LoadBalancer.ServersTransport)
+	}
+}
+
 func TestGenerate_TCPCatchAll(t *testing.T) {
 	cfg := Generate([]db.ResourceWithTargets{
 		{

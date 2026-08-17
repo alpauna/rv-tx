@@ -22,6 +22,8 @@ function NewResourceForm({ nodes, onCreated }) {
   const [domain, setDomain] = useState('');
   const [entryPoint, setEntryPoint] = useState('websecure');
   const [certResolver, setCertResolver] = useState('');
+  const [targetScheme, setTargetScheme] = useState('http');
+  const [targetSkipVerify, setTargetSkipVerify] = useState(false);
   const [targets, setTargets] = useState([emptyTarget()]);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -49,10 +51,14 @@ function NewResourceForm({ nodes, onCreated }) {
         domain: protocol === 'http' ? domain : undefined,
         entry_point: entryPoint,
         cert_resolver: protocol === 'http' && certResolver ? certResolver : undefined,
+        target_scheme: protocol === 'http' ? targetScheme : undefined,
+        target_skip_verify: protocol === 'http' && targetScheme === 'https' ? targetSkipVerify : undefined,
         targets: targets.map(targetToPayload),
       });
       setName('');
       setDomain('');
+      setTargetScheme('http');
+      setTargetSkipVerify(false);
       setTargets([emptyTarget()]);
       onCreated();
     } catch (err) {
@@ -96,6 +102,30 @@ function NewResourceForm({ nodes, onCreated }) {
               <option value="letsencrypt">letsencrypt</option>
             </select>
           </div>
+        </div>
+      )}
+
+      {protocol === 'http' && (
+        <div className="row">
+          <div className="field">
+            <label htmlFor="r-target-scheme">Backend scheme</label>
+            <select id="r-target-scheme" value={targetScheme} onChange={(e) => setTargetScheme(e.target.value)}>
+              <option value="http">http</option>
+              <option value="https">https</option>
+            </select>
+          </div>
+          {targetScheme === 'https' && (
+            <div className="field">
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <input
+                  type="checkbox"
+                  checked={targetSkipVerify}
+                  onChange={(e) => setTargetSkipVerify(e.target.checked)}
+                />
+                Skip TLS verification (self-signed backend cert)
+              </label>
+            </div>
+          )}
         </div>
       )}
 
@@ -253,7 +283,15 @@ export default function Resources() {
                   <td className="mono">{r.domain || r.entry_point}</td>
                   <td>{r.cert_resolver || '-'}</td>
                   <td className="mono">
-                    {r.targets.map((t) => `${t.address}:${t.port}${t.role ? ` (${t.role})` : ''}`).join(', ')}
+                    {r.targets
+                      .map((t) => {
+                        const prefix = r.protocol === 'http' ? `${r.target_scheme || 'http'}://` : '';
+                        return `${prefix}${t.address}:${t.port}${t.role ? ` (${t.role})` : ''}`;
+                      })
+                      .join(', ')}
+                    {r.protocol === 'http' && r.target_scheme === 'https' && r.target_skip_verify && (
+                      <span style={{ color: 'var(--text-dim)' }}> (skip verify)</span>
+                    )}
                   </td>
                   {isAdmin && (
                     <td>

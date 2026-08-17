@@ -36,12 +36,14 @@ type Target struct {
 // ResourceWithTargets is a resource joined with all of its backend
 // targets.
 type ResourceWithTargets struct {
-	Name         string   `json:"name"`
-	Protocol     string   `json:"protocol"`
-	Domain       *string  `json:"domain"`
-	EntryPoint   string   `json:"entry_point"`
-	CertResolver *string  `json:"cert_resolver"`
-	Targets      []Target `json:"targets"`
+	Name             string   `json:"name"`
+	Protocol         string   `json:"protocol"`
+	Domain           *string  `json:"domain"`
+	EntryPoint       string   `json:"entry_point"`
+	CertResolver     *string  `json:"cert_resolver"`
+	TargetScheme     string   `json:"target_scheme"`      // "http" or "https" -- http protocol only, ignored for tcp/udp
+	TargetSkipVerify bool     `json:"target_skip_verify"` // skip TLS verification when TargetScheme is "https" (self-signed backend certs, e.g. Proxmox's own web UI)
+	Targets          []Target `json:"targets"`
 }
 
 // CreateResource validates the target list for the given protocol,
@@ -52,9 +54,15 @@ type ResourceWithTargets struct {
 // unbounded pool (any number of targets, role ignored), tcp/udp
 // resources are at most a primary and a backup (not full load
 // balancing yet).
-func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, entryPoint string, certResolver *string, targets []TargetSpec) error {
+func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain *string, entryPoint string, certResolver *string, targetScheme string, targetSkipVerify bool, targets []TargetSpec) error {
 	if err := validateTargets(protocol, targets); err != nil {
 		return err
+	}
+	if targetScheme == "" {
+		targetScheme = "http"
+	}
+	if targetScheme != "http" && targetScheme != "https" {
+		return fmt.Errorf("target_scheme must be \"http\" or \"https\", got %q", targetScheme)
 	}
 
 	tx, err := db.Pool.Begin(ctx)
@@ -65,10 +73,10 @@ func (db *DB) CreateResource(ctx context.Context, name, protocol string, domain 
 
 	var resourceID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO resources (name, protocol, domain, entry_point, cert_resolver)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO resources (name, protocol, domain, entry_point, cert_resolver, target_scheme, target_skip_verify)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id::text
-	`, name, protocol, domain, entryPoint, certResolver).Scan(&resourceID)
+	`, name, protocol, domain, entryPoint, certResolver, targetScheme, targetSkipVerify).Scan(&resourceID)
 	if err != nil {
 		return fmt.Errorf("insert resource: %w", err)
 	}
@@ -172,6 +180,7 @@ func validateTargets(protocol string, targets []TargetSpec) error {
 func (db *DB) ListResourcesWithTargets(ctx context.Context) ([]ResourceWithTargets, error) {
 	rows, err := db.Pool.Query(ctx, `
 		SELECT r.id::text, r.name, r.protocol, r.domain, r.entry_point, r.cert_resolver,
+		       r.target_scheme, r.target_skip_verify,
 		       COALESCE(host(n.mesh_ip), rt.address), rt.port, rt.role,
 		       (rt.node_id IS NULL), n.last_seen
 		FROM resources r
@@ -189,19 +198,19 @@ func (db *DB) ListResourcesWithTargets(ctx context.Context) ([]ResourceWithTarge
 
 	for rows.Next() {
 		var (
-			id, name, protocol, entryPoint, address, role string
-			domain, certResolver                          *string
-			port                                          int
-			external                                      bool
-			lastSeen                                      *time.Time
+			id, name, protocol, entryPoint, address, role, targetScheme string
+			domain, certResolver                                        *string
+			port                                                        int
+			targetSkipVerify, external                                  bool
+			lastSeen                                                    *time.Time
 		)
-		if err := rows.Scan(&id, &name, &protocol, &domain, &entryPoint, &certResolver, &address, &port, &role, &external, &lastSeen); err != nil {
+		if err := rows.Scan(&id, &name, &protocol, &domain, &entryPoint, &certResolver, &targetScheme, &targetSkipVerify, &address, &port, &role, &external, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan resource target: %w", err)
 		}
 
 		r, ok := byID[id]
 		if !ok {
-			r = &ResourceWithTargets{Name: name, Protocol: protocol, Domain: domain, EntryPoint: entryPoint, CertResolver: certResolver}
+			r = &ResourceWithTargets{Name: name, Protocol: protocol, Domain: domain, EntryPoint: entryPoint, CertResolver: certResolver, TargetScheme: targetScheme, TargetSkipVerify: targetSkipVerify}
 			byID[id] = r
 			order = append(order, id)
 		}

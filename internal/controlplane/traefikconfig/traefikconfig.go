@@ -30,8 +30,19 @@ type Config struct {
 }
 
 type protocolConfig struct {
-	Routers  map[string]router  `json:"routers"`
-	Services map[string]service `json:"services"`
+	Routers           map[string]router           `json:"routers"`
+	Services          map[string]service          `json:"services"`
+	ServersTransports map[string]serversTransport `json:"serversTransports,omitempty"`
+}
+
+// serversTransport controls how Traefik connects to a service's own
+// backend targets -- only ever populated here to skip TLS
+// verification for an https target with a self-signed cert (e.g.
+// Proxmox's own web UI, which doesn't get a real cert by default).
+// Never used for the client-facing side of a router; that's
+// routerTLS/certResolver, a completely separate concept.
+type serversTransport struct {
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 type router struct {
@@ -67,9 +78,10 @@ type service struct {
 }
 
 type loadBalancer struct {
-	Servers     []server     `json:"servers"`
-	Sticky      *sticky      `json:"sticky,omitempty"`
-	HealthCheck *healthCheck `json:"healthCheck,omitempty"`
+	Servers          []server     `json:"servers"`
+	Sticky           *sticky      `json:"sticky,omitempty"`
+	HealthCheck      *healthCheck `json:"healthCheck,omitempty"`
+	ServersTransport string       `json:"serversTransport,omitempty"`
 }
 
 type sticky struct {
@@ -119,7 +131,7 @@ func Generate(resources []db.ResourceWithTargets) Config {
 		switch r.Protocol {
 		case "http":
 			if cfg.HTTP == nil {
-				cfg.HTTP = &protocolConfig{Routers: map[string]router{}, Services: map[string]service{}}
+				cfg.HTTP = &protocolConfig{Routers: map[string]router{}, Services: map[string]service{}, ServersTransports: map[string]serversTransport{}}
 			}
 			rule := "PathPrefix(`/`)"
 			if r.Domain != nil && *r.Domain != "" {
@@ -139,11 +151,25 @@ func Generate(resources []db.ResourceWithTargets) Config {
 				TLS:         tls,
 			}
 
+			scheme := r.TargetScheme
+			if scheme == "" {
+				scheme = "http"
+			}
 			servers := make([]server, len(r.Targets))
 			for i, t := range r.Targets {
-				servers[i] = server{URL: fmt.Sprintf("http://%s:%d", t.Address, t.Port)}
+				servers[i] = server{URL: fmt.Sprintf("%s://%s:%d", scheme, t.Address, t.Port)}
 			}
 			lb := loadBalancer{Servers: servers}
+			if scheme == "https" && r.TargetSkipVerify {
+				// insecureSkipVerify for a self-signed backend cert
+				// (Proxmox's own web UI, TrueNAS, etc. don't get a
+				// real cert by default) -- a per-resource
+				// serversTransport, not global, so it doesn't weaken
+				// TLS verification for any other resource's backend.
+				transportName := r.Name + "-insecure"
+				cfg.HTTP.ServersTransports[transportName] = serversTransport{InsecureSkipVerify: true}
+				lb.ServersTransport = transportName
+			}
 			if len(r.Targets) > 1 {
 				// A pool, not a single backend -- pin each client to
 				// whichever server it lands on first, and let Traefik

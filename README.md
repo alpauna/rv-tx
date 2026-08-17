@@ -20,6 +20,10 @@ Session cookies carry `{email, role, exp}` in the signed payload (`internal/cont
 
 The very first admin account is bootstrapped once, at startup, only when the `users` table is empty (`RVTX_BOOTSTRAP_ADMIN_EMAIL` + the pre-existing `RVTX_DASHBOARD_PASSWORD_HASH` from before per-user accounts existed) — every account after that goes through the normal invite flow. Email delivery config (`RVTX_SMTP_SERVER`/`PORT`/`USER`/`PASSWORD`/`FROM`) is reused verbatim from the `dnsmasq-ui` project's own `smtp.env` — same relay, same credentials, no new provisioning.
 
+### HTTPS backend targets, with an optional skip-verify for self-signed certs
+
+An `http`-protocol resource's `target_scheme` (`"http"`, the default, or `"https"`) controls how Traefik talks to the *backend*, completely independent of `cert_resolver` (which is about the *client-facing* side — see the ACME notes above). This is what lets a resource point at something that's HTTPS-only with no plain-HTTP listener at all, like Proxmox's own web UI (`:8006`) or TrueNAS. Since most internal appliances like that only ever get a self-signed cert, `target_skip_verify: true` adds a per-resource Traefik `serversTransport` with `insecureSkipVerify: true` — scoped to that one resource's backend connection only, never global, so it can't weaken TLS verification for any other resource's backend or for the client-facing side of any router.
+
 ### Multiple DNS names for one resource — what Traefik can and can't do
 
 Traefik's own automatic ACME domain detection only reads a router's `Host()` rule — it can't request a cert for anything a `Host()` rule doesn't literally spell out, so out of the box one resource means one exact hostname. Two things this project adds on top of that, both in `internal/controlplane/traefikconfig`:
@@ -58,6 +62,7 @@ Both images build and the control plane has been smoke-tested end-to-end in a co
 7. Dashboard (React SPA, embedded + auth) + wildcard-domain support — done, `rv-tx.com`/`*.rv-tx.com` both serve the dashboard over real production HTTPS
 8. Per-user accounts, roles, and email-based invite/password-reset — done, verified live end-to-end (invite → set password → login, forgot-password → reset → login with new password, and viewer-role 403s on every mutating route)
 9. Docker packaging for both the control plane and the agent — done, both images build and the control plane is smoke-tested in a container; not yet used to replace the production systemd deployments
+10. HTTPS backend targets + self-signed skip-verify — done, verified live against a real self-signed target (Proxmox's own web UI)
 
 ## Known gaps
 

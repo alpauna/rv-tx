@@ -264,12 +264,14 @@ func listResourcesHandler(database *db.DB) sessionHandler {
 // number (a load-balanced pool), tcp/udp resources at most a primary
 // and a backup (validated in db.CreateResource).
 type createResourceRequest struct {
-	Name         string           `json:"name"`
-	Protocol     string           `json:"protocol"`
-	Domain       string           `json:"domain,omitempty"`
-	EntryPoint   string           `json:"entry_point"`
-	CertResolver string           `json:"cert_resolver,omitempty"` // http only -- name of a Traefik certificatesResolvers entry (static config)
-	Targets      []targetSpecJSON `json:"targets"`
+	Name             string           `json:"name"`
+	Protocol         string           `json:"protocol"`
+	Domain           string           `json:"domain,omitempty"`
+	EntryPoint       string           `json:"entry_point"`
+	CertResolver     string           `json:"cert_resolver,omitempty"`      // http only -- name of a Traefik certificatesResolvers entry (static config)
+	TargetScheme     string           `json:"target_scheme,omitempty"`      // http only -- "http" (default) or "https", for a backend that's itself HTTPS-only (e.g. Proxmox's own web UI)
+	TargetSkipVerify bool             `json:"target_skip_verify,omitempty"` // http+https only -- skip TLS verification for a self-signed backend cert
+	Targets          []targetSpecJSON `json:"targets"`
 }
 
 // targetSpecJSON: exactly one of NodeName or Address must be set --
@@ -305,7 +307,7 @@ func createResourceHandler(database *db.DB) sessionHandler {
 			targets[i] = db.TargetSpec{NodeName: t.NodeName, Address: t.Address, Port: t.Port, Role: t.Role}
 		}
 
-		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, certResolver, targets)
+		err := database.CreateResource(r.Context(), req.Name, req.Protocol, domain, req.EntryPoint, certResolver, req.TargetScheme, req.TargetSkipVerify, targets)
 		if err != nil {
 			log.Printf("create resource %q: %v", req.Name, err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
